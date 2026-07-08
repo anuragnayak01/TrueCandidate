@@ -141,7 +141,7 @@ async def inject_event(meeting_id: str, body: dict):
 # ---------------------------------------------------------------------------
 import hashlib
 import hmac
-ZOOM_WEBHOOK_SECRET = os.environ.get("ZOOM_WEBHOOK_SECRET", "ZEKc3MMwTz-46Un8w7G-kA")
+ZOOM_WEBHOOK_SECRET = os.environ.get("ZOOM_WEBHOOK_SECRET", "")
 @app.post("/api/zoom/webhook")
 async def zoom_webhook(request: Request):
     """
