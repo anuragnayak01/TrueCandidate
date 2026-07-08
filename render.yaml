@@ -1,0 +1,25 @@
+# render.yaml — Render.com free tier deployment
+# Free: 512MB RAM, auto-sleeps after 15min inactivity (wakes on request)
+# WebSockets are supported on Render free tier
+
+services:
+  - type: web
+    name: sherlock-candidate-id
+    runtime: python
+    region: singapore
+    plan: free
+
+    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
+    startCommand: cd backend && python server.py
+
+    healthCheckPath: /api/scenarios
+
+    envVars:
+      - key: PORT
+        value: "8765"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Add these via Render dashboard (Settings → Environment):
+      # ZOOM_WEBHOOK_SECRET
+      # GMEET_BOT_EMAIL
+      # GMEET_BOT_PASSWORD
