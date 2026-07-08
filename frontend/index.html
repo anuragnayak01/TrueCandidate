@@ -1,0 +1,1608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sherlock — AI Candidate Identification</title>
+  <meta name="description" content="Real-time interview candidate identification using multi-signal AI fusion" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ===== RESET & TOKENS ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #080b14;
+      --surface:      #0d1220;
+      --surface2:     #121828;
+      --border:       rgba(99,102,241,0.18);
+      --border-soft:  rgba(255,255,255,0.06);
+      --indigo:       #6366f1;
+      --indigo-light: #818cf8;
+      --cyan:         #22d3ee;
+      --emerald:      #10b981;
+      --amber:        #f59e0b;
+      --rose:         #f43f5e;
+      --purple:       #a855f7;
+      --text:         #e2e8f0;
+      --text-muted:   #64748b;
+      --text-dim:     #334155;
+      --radius:       12px;
+      --radius-sm:    8px;
+      --shadow:       0 4px 24px rgba(0,0,0,0.5);
+      --glow-indigo:  0 0 32px rgba(99,102,241,0.25);
+      --glow-emerald: 0 0 32px rgba(16,185,129,0.30);
+      --glow-amber:   0 0 24px rgba(245,158,11,0.25);
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', system-ui, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ===== BACKGROUND GRID ===== */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(99,102,241,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(99,102,241,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ===== HEADER ===== */
+    .header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(8,11,20,0.85);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      height: 64px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--indigo), var(--purple));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      box-shadow: var(--glow-indigo);
+      flex-shrink: 0;
+    }
+
+    .logo-text {
+      font-size: 20px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #fff 30%, var(--indigo-light));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+
+    .logo-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      background: rgba(99,102,241,0.2);
+      border: 1px solid rgba(99,102,241,0.4);
+      border-radius: 99px;
+      color: var(--indigo-light);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .header-spacer { flex: 1; }
+
+    .connection-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.3s;
+    }
+
+    .connection-pill.connected {
+      background: rgba(16,185,129,0.12);
+      border: 1px solid rgba(16,185,129,0.3);
+      color: var(--emerald);
+    }
+
+    .connection-pill.disconnected {
+      background: rgba(244,63,94,0.12);
+      border: 1px solid rgba(244,63,94,0.3);
+      color: var(--rose);
+    }
+
+    .connection-pill .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .connection-pill.connected .dot {
+      animation: pulse-dot 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.5; transform: scale(0.7); }
+    }
+
+    /* ===== LAYOUT ===== */
+    .app-layout {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 340px 1fr 300px;
+      grid-template-rows: auto 1fr;
+      gap: 0;
+      height: calc(100vh - 64px);
+    }
+
+    /* ===== SCENARIO BANNER ===== */
+    .scenario-banner {
+      grid-column: 1 / -1;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border-soft);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .scenario-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .scenario-select {
+      appearance: none;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 32px 6px 12px;
+      cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      transition: border-color 0.2s;
+    }
+
+    .scenario-select:focus { outline: none; border-color: var(--indigo); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 16px;
+      border-radius: var(--radius-sm);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--indigo), var(--purple));
+      color: white;
+      box-shadow: 0 2px 12px rgba(99,102,241,0.35);
+    }
+
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(99,102,241,0.5); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .btn-ghost:hover { border-color: var(--indigo); color: var(--text); }
+
+    .scenario-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      flex: 1;
+      min-width: 0;
+    }
+
+    .progress-bar-outer {
+      height: 3px;
+      background: var(--surface2);
+      border-radius: 99px;
+      overflow: hidden;
+      width: 160px;
+      flex-shrink: 0;
+    }
+
+    .progress-bar-inner {
+      height: 100%;
+      background: linear-gradient(90deg, var(--indigo), var(--cyan));
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+
+    /* ===== LEFT PANEL: Context + Identification ===== */
+    .panel-left {
+      border-right: 1px solid var(--border-soft);
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-soft) transparent;
+    }
+
+    .panel-section {
+      padding: 16px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .panel-section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Meeting Context card */
+    .context-card {
+      background: var(--surface2);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+
+    .context-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .context-row:last-child { margin-bottom: 0; }
+
+    .context-icon {
+      font-size: 14px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .context-key {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .context-val {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .context-val.missing { color: var(--text-dim); font-style: italic; }
+
+    /* Identification result */
+    .id-result-card {
+      border-radius: var(--radius);
+      padding: 16px;
+      transition: all 0.5s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .id-result-card.unknown {
+      background: var(--surface2);
+      border: 1px solid var(--border-soft);
+    }
+
+    .id-result-card.ambiguous {
+      background: rgba(245,158,11,0.05);
+      border: 1px solid rgba(245,158,11,0.25);
+    }
+
+    .id-result-card.identified {
+      background: rgba(16,185,129,0.05);
+      border: 1px solid rgba(16,185,129,0.25);
+      box-shadow: var(--glow-emerald);
+    }
+
+    .id-result-card.locked {
+      background: rgba(99,102,241,0.07);
+      border: 1px solid rgba(99,102,241,0.40);
+      box-shadow: var(--glow-indigo);
+      animation: locked-pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes locked-pulse {
+      0%, 100% { box-shadow: var(--glow-indigo); }
+      50% { box-shadow: 0 0 48px rgba(99,102,241,0.45); }
+    }
+
+    .id-status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .id-status-icon { font-size: 22px; }
+
+    .id-status-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .id-name {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.2;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, var(--text), var(--indigo-light));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* Confidence gauge */
+    .confidence-wrap {
+      margin-bottom: 12px;
+    }
+
+    .confidence-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+
+    .confidence-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .confidence-pct {
+      font-size: 22px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      transition: color 0.4s;
+    }
+
+    .confidence-pct.low    { color: var(--rose); }
+    .confidence-pct.medium { color: var(--amber); }
+    .confidence-pct.high   { color: var(--emerald); }
+    .confidence-pct.locked { color: var(--indigo-light); }
+
+    .confidence-track {
+      height: 8px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    .confidence-fill {
+      height: 100%;
+      border-radius: 99px;
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s;
+    }
+
+    .confidence-fill.low    { background: linear-gradient(90deg, var(--rose), #fb7185); }
+    .confidence-fill.medium { background: linear-gradient(90deg, var(--amber), #fbbf24); }
+    .confidence-fill.high   { background: linear-gradient(90deg, var(--emerald), #34d399); }
+    .confidence-fill.locked { background: linear-gradient(90deg, var(--indigo), var(--cyan)); }
+
+    /* Explanation bullets */
+    .explanation-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .explanation-list li {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid transparent;
+    }
+
+    .explanation-list li:first-child {
+      color: var(--text);
+      font-weight: 500;
+      border-color: var(--border-soft);
+    }
+
+    /* ===== CENTER PANEL: Participants ===== */
+    .panel-center {
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-soft) transparent;
+      padding: 16px;
+    }
+
+    .participants-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .participant-card {
+      background: var(--surface);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: all 0.4s ease;
+      cursor: pointer;
+    }
+
+    .participant-card:hover { border-color: var(--border); }
+
+    .participant-card.candidate-likely {
+      border-color: rgba(16,185,129,0.35);
+      box-shadow: 0 0 20px rgba(16,185,129,0.10);
+    }
+
+    .participant-card.candidate-locked {
+      border-color: rgba(99,102,241,0.50);
+      box-shadow: 0 0 24px rgba(99,102,241,0.20);
+      animation: card-glow 3s ease-in-out infinite;
+    }
+
+    @keyframes card-glow {
+      0%, 100% { box-shadow: 0 0 24px rgba(99,102,241,0.20); }
+      50% { box-shadow: 0 0 36px rgba(99,102,241,0.35); }
+    }
+
+    .participant-card.excluded { opacity: 0.55; }
+
+    .participant-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+    }
+
+    .participant-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 700;
+      flex-shrink: 0;
+      border: 2px solid;
+      transition: all 0.4s;
+      position: relative;
+    }
+
+    .participant-avatar .speaking-ring {
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid var(--emerald);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .participant-avatar.speaking .speaking-ring {
+      opacity: 1;
+      animation: speaking-ring 1s ease-in-out infinite;
+    }
+
+    @keyframes speaking-ring {
+      0%, 100% { transform: scale(1); opacity: 0.8; }
+      50% { transform: scale(1.08); opacity: 0.4; }
+    }
+
+    .participant-info { flex: 1; min-width: 0; }
+
+    .participant-name {
+      font-size: 15px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .candidate-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 2px 7px;
+      border-radius: 99px;
+      text-transform: uppercase;
+    }
+
+    .candidate-badge.identified {
+      background: rgba(16,185,129,0.15);
+      color: var(--emerald);
+      border: 1px solid rgba(16,185,129,0.3);
+    }
+
+    .candidate-badge.locked {
+      background: rgba(99,102,241,0.15);
+      color: var(--indigo-light);
+      border: 1px solid rgba(99,102,241,0.4);
+      animation: badge-shimmer 2s ease-in-out infinite;
+    }
+
+    @keyframes badge-shimmer {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .participant-meta {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .participant-meta .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    /* Mini probability bar in card */
+    .probability-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px 12px;
+    }
+
+    .prob-track {
+      flex: 1;
+      height: 5px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    .prob-fill {
+      height: 100%;
+      border-radius: 99px;
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s;
+    }
+
+    .prob-pct {
+      font-size: 12px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      min-width: 38px;
+      text-align: right;
+      transition: color 0.3s;
+    }
+
+    /* Signal breakdown (expandable) */
+    .signal-panel {
+      padding: 0 16px 14px;
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      border-top: 1px solid var(--border-soft);
+      padding-top: 12px;
+    }
+
+    .signal-panel.open { display: flex; }
+
+    .signal-row {
+      display: grid;
+      grid-template-columns: 140px 1fr 42px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .signal-name {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .signal-track {
+      height: 4px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 99px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .signal-fill {
+      height: 100%;
+      border-radius: 99px;
+      transition: width 0.5s ease, background 0.3s;
+      position: relative;
+    }
+
+    .signal-score {
+      font-size: 10.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .signal-reason {
+      grid-column: 1 / -1;
+      font-size: 10.5px;
+      color: var(--text-dim);
+      line-height: 1.4;
+      margin-top: 1px;
+    }
+
+    .expand-toggle {
+      font-size: 10px;
+      color: var(--text-muted);
+      padding: 4px 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      user-select: none;
+      transition: color 0.2s;
+    }
+
+    .expand-toggle:hover { color: var(--text); }
+
+    .expand-toggle .chevron {
+      display: inline-block;
+      transition: transform 0.25s;
+      font-size: 8px;
+    }
+
+    .expand-toggle.open .chevron { transform: rotate(180deg); }
+
+    /* ===== RIGHT PANEL: Event log ===== */
+    .panel-right {
+      border-left: 1px solid var(--border-soft);
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-soft) transparent;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .event-log-header {
+      padding: 14px 14px 10px;
+      border-bottom: 1px solid var(--border-soft);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      background: var(--bg);
+      z-index: 10;
+    }
+
+    .event-log-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .event-count-badge {
+      font-size: 10px;
+      font-weight: 600;
+      background: rgba(99,102,241,0.15);
+      color: var(--indigo-light);
+      padding: 1px 7px;
+      border-radius: 99px;
+      border: 1px solid rgba(99,102,241,0.25);
+    }
+
+    .event-list {
+      flex: 1;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .event-item {
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border-soft);
+      animation: event-enter 0.3s ease;
+      transition: border-color 0.2s;
+    }
+
+    .event-item:hover { border-color: var(--border); }
+
+    @keyframes event-enter {
+      from { opacity: 0; transform: translateX(8px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    .event-top {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 3px;
+    }
+
+    .event-icon { font-size: 13px; flex-shrink: 0; }
+
+    .event-type-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      flex: 1;
+    }
+
+    .event-time {
+      font-size: 9px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .event-participant {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .event-detail {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      line-height: 1.4;
+      margin-top: 2px;
+    }
+
+    /* Confidence delta badge */
+    .conf-delta {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 99px;
+      margin-top: 4px;
+    }
+
+    .conf-delta.up   { background: rgba(16,185,129,0.12); color: var(--emerald); }
+    .conf-delta.down { background: rgba(244,63,94,0.12); color: var(--rose); }
+    .conf-delta.same { background: rgba(100,116,139,0.12); color: var(--text-muted); }
+
+    /* ===== EMPTY STATE ===== */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .empty-icon { font-size: 40px; opacity: 0.5; }
+    .empty-title { font-size: 15px; font-weight: 600; color: var(--text); }
+    .empty-sub { font-size: 12px; line-height: 1.6; max-width: 240px; }
+
+    /* ===== TOAST ===== */
+    #toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    .toast {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      font-size: 13px;
+      box-shadow: var(--shadow);
+      animation: toast-in 0.35s ease;
+      min-width: 240px;
+      max-width: 320px;
+    }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(12px) scale(0.95); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .toast.success { border-color: rgba(16,185,129,0.4); }
+    .toast.warning { border-color: rgba(245,158,11,0.4); }
+    .toast.info    { border-color: rgba(99,102,241,0.4); }
+
+    /* ===== STATS ROW ===== */
+    .stats-row {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .stat-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      background: var(--surface2);
+      border: 1px solid var(--border-soft);
+      white-space: nowrap;
+    }
+
+    .stat-chip .val {
+      font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ===== UTILITY ===== */
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+    }
+
+    @media (max-width: 900px) {
+      .app-layout { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr auto; }
+      .panel-left, .panel-right { border: none; border-bottom: 1px solid var(--border-soft); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ===== HEADER ===== -->
+<header class="header" role="banner">
+  <div class="logo">
+    <div class="logo-icon" aria-hidden="true">🔍</div>
+    <span class="logo-text">Sherlock</span>
+    <span class="logo-badge">Prototype</span>
+  </div>
+  <div class="header-spacer"></div>
+  <div id="connection-status" class="connection-pill disconnected" role="status" aria-live="polite">
+    <span class="dot" aria-hidden="true"></span>
+    <span>Connecting…</span>
+  </div>
+</header>
+
+<!-- ===== MAIN LAYOUT ===== -->
+<main class="app-layout" role="main">
+
+  <!-- Scenario banner -->
+  <div class="scenario-banner" id="scenario-banner">
+    <span class="scenario-label">Scenario</span>
+    <select id="scenario-select" class="scenario-select" aria-label="Select demo scenario"></select>
+    <button id="run-btn" class="btn btn-primary" aria-label="Run selected scenario">
+      ▶ Run Demo
+    </button>
+    <button id="reset-btn" class="btn btn-ghost" aria-label="Reset to initial state">
+      ↺ Reset
+    </button>
+    <span id="scenario-desc" class="scenario-desc"></span>
+    <div class="progress-bar-outer" title="Scenario progress" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-bar-inner" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <!-- LEFT: Meeting context + identification -->
+  <aside class="panel-left" aria-label="Meeting context and identification result">
+
+    <!-- Meeting context -->
+    <div class="panel-section">
+      <div class="panel-section-title">
+        📋 ATS / Calendar Context
+      </div>
+      <div class="context-card" id="context-card">
+        <div class="empty-state" style="padding: 20px">
+          <div class="empty-icon">📋</div>
+          <div class="empty-sub">Run a scenario to see meeting context</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Identification result -->
+    <div class="panel-section">
+      <div class="panel-section-title">
+        🎯 Identification Result
+      </div>
+      <div class="id-result-card unknown" id="id-result-card">
+        <div class="id-status-row">
+          <span class="id-status-icon">⏳</span>
+          <span class="id-status-label" style="color: var(--text-muted)">Waiting</span>
+        </div>
+        <div style="font-size: 12px; color: var(--text-muted)">
+          Start a scenario to begin identification
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="panel-section">
+      <div class="panel-section-title">📊 Session Stats</div>
+      <div class="stats-row" style="padding: 0; flex-wrap: wrap;">
+        <div class="stat-chip">Events <span class="val" id="stat-events">0</span></div>
+        <div class="stat-chip">Participants <span class="val" id="stat-participants">0</span></div>
+        <div class="stat-chip">Confidence <span class="val" id="stat-confidence">—</span></div>
+      </div>
+    </div>
+
+    <!-- Signal weight legend -->
+    <div class="panel-section">
+      <div class="panel-section-title">⚖️ Signal Weights</div>
+      <div style="display: flex; flex-direction: column; gap: 5px;" id="weight-legend">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+  </aside>
+
+  <!-- CENTER: Participant cards -->
+  <section class="panel-center" aria-label="Participant list with confidence scores">
+    <div style="font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-muted); padding: 4px 0 12px; display: flex; align-items: center; gap: 8px;">
+      👥 Participants
+      <span id="participants-count" style="font-weight: 500; color: var(--text-dim)"></span>
+    </div>
+    <div class="participants-grid" id="participants-grid">
+      <div class="empty-state">
+        <div class="empty-icon">👤</div>
+        <div class="empty-title">No participants yet</div>
+        <div class="empty-sub">Select a scenario and click Run Demo to start the simulation</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: Event log -->
+  <aside class="panel-right" aria-label="Live event log">
+    <div class="event-log-header">
+      <span class="event-log-title">📡 Live Events</span>
+      <span class="event-count-badge" id="event-count-badge">0</span>
+    </div>
+    <div class="event-list" id="event-list">
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <div class="empty-sub">Events will stream here in real-time</div>
+      </div>
+    </div>
+  </aside>
+
+</main>
+
+<!-- Toast container -->
+<div id="toast-container" aria-live="polite"></div>
+
+<script>
+// ===========================================================================
+// CONFIG
+// ===========================================================================
+const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? `http://${window.location.hostname}:8765`
+  : window.location.origin;
+
+const WS_BASE  = API_BASE.replace(/^http/, 'ws');
+
+const SIGNAL_META = {
+  email_match:            { label: 'Email Match',            weight: 0.30, color: '#6366f1' },
+  interviewer_exclusion:  { label: 'Interviewer Exclusion',  weight: 0.25, color: '#a855f7' },
+  name_match:             { label: 'Name Match',             weight: 0.20, color: '#22d3ee' },
+  speaking_pattern:       { label: 'Speaking Pattern',       weight: 0.12, color: '#10b981' },
+  transcript_language:    { label: 'Transcript Language',    weight: 0.07, color: '#f59e0b' },
+  join_order:             { label: 'Join Order',             weight: 0.04, color: '#fb923c' },
+  screen_share:           { label: 'Screen Share',           weight: 0.02, color: '#64748b' },
+};
+
+const EVENT_META = {
+  participant_join:    { icon: '👤', label: 'Joined',       color: '#22d3ee' },
+  participant_leave:   { icon: '🚪', label: 'Left',         color: '#f43f5e' },
+  speaking_start:      { icon: '🎤', label: 'Speaking',     color: '#10b981' },
+  speaking_end:        { icon: '🔇', label: 'Silent',       color: '#64748b' },
+  transcript_segment:  { icon: '💬', label: 'Transcript',   color: '#6366f1' },
+  screen_share_start:  { icon: '🖥️', label: 'Screen On',   color: '#f59e0b' },
+  screen_share_end:    { icon: '🖥️', label: 'Screen Off',  color: '#64748b' },
+  name_change:         { icon: '✏️', label: 'Renamed',      color: '#a855f7' },
+  webcam_on:           { icon: '📷', label: 'Cam On',       color: '#10b981' },
+  webcam_off:          { icon: '📷', label: 'Cam Off',      color: '#64748b' },
+};
+
+// ===========================================================================
+// STATE
+// ===========================================================================
+let ws = null;
+let meetingId = null;
+let scenarios = [];
+let participantState = {};   // pid → participant dict
+let idResult = null;
+let prevConfidence = 0;
+let eventCount = 0;
+let totalEvents = 0;         // for progress bar
+let scenarioEventCounts = {};
+let speakingParticipants = new Set();
+
+// ===========================================================================
+// STARTUP
+// ===========================================================================
+document.addEventListener('DOMContentLoaded', async () => {
+  renderWeightLegend();
+  await loadScenarios();
+
+  document.getElementById('run-btn').addEventListener('click', runScenario);
+  document.getElementById('reset-btn').addEventListener('click', resetUI);
+  document.getElementById('scenario-select').addEventListener('change', onScenarioChange);
+});
+
+// ===========================================================================
+// SCENARIOS
+// ===========================================================================
+async function loadScenarios() {
+  try {
+    const res = await fetch(`${API_BASE}/api/scenarios`);
+    scenarios = await res.json();
+
+    const sel = document.getElementById('scenario-select');
+    sel.innerHTML = scenarios.map(s =>
+      `<option value="${s.key}">${s.emoji || ''} ${s.name} — ${s.difficulty}</option>`
+    ).join('');
+
+    // Precompute event counts for progress
+    scenarios.forEach(s => {
+      // We won't know exact count without fetching, estimate from description
+      scenarioEventCounts[s.key] = 20; // rough estimate
+    });
+
+    onScenarioChange();
+  } catch (e) {
+    toast('Cannot reach backend. Make sure the server is running on :8765', 'warning');
+  }
+}
+
+function onScenarioChange() {
+  const sel = document.getElementById('scenario-select');
+  const key = sel.value;
+  const sc = scenarios.find(s => s.key === key);
+  if (sc) {
+    document.getElementById('scenario-desc').textContent = sc.description || '';
+  }
+}
+
+async function runScenario() {
+  const key = document.getElementById('scenario-select').value;
+  if (!key) return;
+
+  resetUI();
+  document.getElementById('run-btn').disabled = true;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/meeting/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario: key }),
+    });
+    const data = await res.json();
+    meetingId = data.meeting_id;
+
+    // Render context immediately
+    renderContext(data.context);
+
+    // Connect WebSocket
+    connectWS(meetingId);
+  } catch (e) {
+    toast('Failed to start meeting. Is the backend running?', 'warning');
+    document.getElementById('run-btn').disabled = false;
+  }
+}
+
+// ===========================================================================
+// WEBSOCKET
+// ===========================================================================
+function connectWS(id) {
+  if (ws) { ws.close(); ws = null; }
+
+  ws = new WebSocket(`${WS_BASE}/ws/${id}`);
+
+  ws.onopen = () => setConnectionStatus(true);
+  ws.onclose = () => {
+    setConnectionStatus(false);
+    document.getElementById('run-btn').disabled = false;
+  };
+  ws.onerror = () => {
+    setConnectionStatus(false);
+    toast('WebSocket connection failed', 'warning');
+  };
+
+  ws.onmessage = ({ data }) => {
+    const msg = JSON.parse(data);
+    handleMessage(msg);
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'connected':
+      toast(`Connected to meeting ${msg.meeting_id}`, 'info');
+      break;
+
+    case 'meeting_event': {
+      eventCount++;
+      const sc = scenarios.find(s => s.key === document.getElementById('scenario-select').value);
+      // update progress (rough estimate)
+      const est = sc ? (scenarioEventCounts[sc.key] || 30) : 30;
+      updateProgress(Math.min(95, (eventCount / est) * 100));
+
+      // Update participant state from full state
+      if (msg.state && msg.state.participants) {
+        participantState = msg.state.participants;
+      }
+
+      // Update speaking indicator
+      const et = msg.event.event_type;
+      const pid = msg.event.participant_id;
+      if (et === 'speaking_start')  speakingParticipants.add(pid);
+      if (et === 'speaking_end')    speakingParticipants.delete(pid);
+      if (et === 'participant_leave') speakingParticipants.delete(pid);
+
+      // Render identification result
+      if (msg.identification) {
+        const prevConf = idResult ? idResult.confidence : 0;
+        idResult = msg.identification;
+        renderIdentification(idResult, prevConf);
+      }
+
+      // Render participants
+      renderParticipants(msg.identification);
+
+      // Add event to log
+      addEventToLog(msg.event, msg.identification);
+
+      // Update stats
+      document.getElementById('stat-events').textContent = eventCount;
+      document.getElementById('stat-participants').textContent =
+        Object.keys(participantState).length;
+      if (idResult) {
+        document.getElementById('stat-confidence').textContent =
+          idResult.is_ambiguous ? '—' : `${(idResult.confidence * 100).toFixed(0)}%`;
+      }
+
+      // Update badge
+      document.getElementById('event-count-badge').textContent = eventCount;
+      break;
+    }
+
+    case 'scenario_complete':
+      updateProgress(100);
+      toast('✅ Scenario complete — review the identification result', 'success');
+      document.getElementById('run-btn').disabled = false;
+      break;
+  }
+}
+
+// ===========================================================================
+// RENDER: Context card
+// ===========================================================================
+function renderContext(ctx) {
+  const el = document.getElementById('context-card');
+  const row = (icon, key, val) => {
+    const missing = !val;
+    return `
+      <div class="context-row">
+        <span class="context-icon" aria-hidden="true">${icon}</span>
+        <div>
+          <div class="context-key">${key}</div>
+          <div class="context-val ${missing ? 'missing' : ''}">${val || 'Not provided'}</div>
+        </div>
+      </div>`;
+  };
+
+  el.innerHTML = `
+    ${row('👤', 'Candidate Name',  ctx.candidate_name)}
+    ${row('📧', 'Candidate Email', ctx.candidate_email)}
+    ${row('💼', 'Job Title',       ctx.job_title)}
+    ${row('🏢', 'Company',         ctx.company)}
+    ${row('🎙️', 'Interviewers',   ctx.interviewer_names?.join(', '))}
+  `;
+}
+
+// ===========================================================================
+// RENDER: Identification result
+// ===========================================================================
+function renderIdentification(result, prevConf) {
+  const card = document.getElementById('id-result-card');
+
+  let stateClass = 'unknown';
+  let icon = '⏳';
+  let statusLabel = 'Waiting';
+  let statusColor = 'var(--text-muted)';
+
+  if (result.is_ambiguous) {
+    stateClass = result.event_count < 3 ? 'unknown' : 'ambiguous';
+    icon = result.event_count < 3 ? '⏳' : '⚠️';
+    statusLabel = result.event_count < 3 ? 'Gathering Data' : 'Ambiguous';
+    statusColor = 'var(--amber)';
+  } else if (result.is_locked) {
+    stateClass = 'locked';
+    icon = '🔒';
+    statusLabel = 'LOCKED IN';
+    statusColor = 'var(--indigo-light)';
+  } else {
+    stateClass = 'identified';
+    icon = '✅';
+    statusLabel = 'Identified';
+    statusColor = 'var(--emerald)';
+  }
+
+  card.className = `id-result-card ${stateClass}`;
+
+  const conf = result.confidence;
+  const confPct = Math.round(conf * 100);
+  const confClass = conf >= 0.85 ? 'locked' : conf >= 0.65 ? 'high' : conf >= 0.45 ? 'medium' : 'low';
+
+  const explanation = (result.explanation || [])
+    .map(l => `<li>${escHtml(l)}</li>`).join('');
+
+  card.innerHTML = `
+    <div class="id-status-row">
+      <span class="id-status-icon">${icon}</span>
+      <span class="id-status-label" style="color: ${statusColor}">${statusLabel}</span>
+    </div>
+    ${result.candidate_display_name
+      ? `<div class="id-name">${escHtml(result.candidate_display_name)}</div>`
+      : `<div style="color: var(--text-muted); font-size: 13px; margin-bottom: 10px">No confident identification yet</div>`}
+    <div class="confidence-wrap">
+      <div class="confidence-header">
+        <span class="confidence-label">Confidence</span>
+        <span class="confidence-pct ${confClass}">${confPct}%</span>
+      </div>
+      <div class="confidence-track">
+        <div class="confidence-fill ${confClass}" style="width: ${confPct}%"></div>
+      </div>
+    </div>
+    <ul class="explanation-list">${explanation}</ul>
+  `;
+}
+
+// ===========================================================================
+// RENDER: Participant cards
+// ===========================================================================
+function renderParticipants(idResult) {
+  const grid = document.getElementById('participants-grid');
+  const pids = Object.keys(participantState);
+
+  document.getElementById('participants-count').textContent =
+    pids.length ? `(${pids.length})` : '';
+
+  if (!pids.length) {
+    grid.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">👤</div>
+      <div class="empty-title">No participants yet</div>
+      <div class="empty-sub">Select a scenario and click Run Demo</div>
+    </div>`;
+    return;
+  }
+
+  // Sort by probability descending
+  const probMap = idResult ? idResult.participant_probabilities : {};
+  const sorted = pids.sort((a, b) => (probMap[b] || 0) - (probMap[a] || 0));
+
+  // Preserve expanded state
+  const expanded = new Set();
+  grid.querySelectorAll('.signal-panel.open').forEach(el => {
+    expanded.add(el.closest('.participant-card')?.dataset.pid);
+  });
+
+  grid.innerHTML = sorted.map(pid => {
+    const p = participantState[pid];
+    const prob = probMap[pid] ?? 0;
+    const isCandidate = idResult && idResult.candidate_participant_id === pid;
+    const isLocked = idResult && idResult.is_locked && isCandidate;
+    const isExcluded = prob < 0.08;
+    const isSpeaking = speakingParticipants.has(pid);
+
+    const cardClass = isLocked ? 'candidate-locked' : isCandidate ? 'candidate-likely' : isExcluded ? 'excluded' : '';
+    const probClass = prob >= 0.65 ? 'high' : prob >= 0.40 ? 'medium' : 'low';
+    const probColor = prob >= 0.65 ? '#10b981' : prob >= 0.40 ? '#f59e0b' : '#f43f5e';
+    const avatarColor = `hsl(${hashCode(pid) % 360}, 60%, 35%)`;
+    const initials = (p.display_name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+
+    const badge = isLocked
+      ? `<span class="candidate-badge locked">🔒 Locked</span>`
+      : isCandidate
+        ? `<span class="candidate-badge identified">Candidate</span>`
+        : '';
+
+    const signals = p.signals || {};
+    const signalRows = Object.entries(SIGNAL_META).map(([key, meta]) => {
+      const sig = signals[key];
+      if (!sig) return '';
+      const sc = sig.score ?? 0.5;
+      const sigColor = sc >= 0.65 ? '#10b981' : sc <= 0.35 ? '#f43f5e' : '#f59e0b';
+      return `
+        <div class="signal-row">
+          <span class="signal-name" title="${meta.label}">${meta.label}</span>
+          <div class="signal-track">
+            <div class="signal-fill" style="width:${Math.round(sc*100)}%; background: ${sigColor};"></div>
+          </div>
+          <span class="signal-score" style="color:${sigColor}">${Math.round(sc*100)}%</span>
+          <div class="signal-reason">${escHtml(sig.reason || '')}</div>
+        </div>`;
+    }).join('');
+
+    const isExpanded = expanded.has(pid);
+
+    return `
+      <div class="participant-card ${cardClass}" data-pid="${pid}" id="card-${pid}" role="article">
+        <div class="participant-header" onclick="toggleSignals('${pid}')">
+          <div class="participant-avatar ${isSpeaking ? 'speaking' : ''}"
+               style="background: ${avatarColor}; border-color: ${probColor}; color: #fff;">
+            ${initials}
+            <div class="speaking-ring"></div>
+          </div>
+          <div class="participant-info">
+            <div class="participant-name">
+              ${escHtml(p.display_name)}
+              ${badge}
+            </div>
+            <div class="participant-meta">
+              <span class="tag">🔢 Joined #${p.join_order}</span>
+              ${p.speaking_duration > 0 ? `<span class="tag">🎤 ${fmtDur(p.speaking_duration)}</span>` : ''}
+              ${p.has_shared_screen ? `<span class="tag">🖥️ Shared</span>` : ''}
+            </div>
+          </div>
+        </div>
+        <div class="probability-row">
+          <span style="font-size:11px; color: var(--text-muted); min-width: 50px;">Candidate</span>
+          <div class="prob-track">
+            <div class="prob-fill" style="width:${Math.round(prob*100)}%; background: linear-gradient(90deg, ${probColor}, ${probColor}99);"></div>
+          </div>
+          <span class="prob-pct" style="color: ${probColor}">${Math.round(prob*100)}%</span>
+        </div>
+        <div class="expand-toggle ${isExpanded ? 'open' : ''}" onclick="toggleSignals('${pid}')">
+          <span class="chevron">▼</span>
+          Signal Breakdown (7 signals)
+        </div>
+        <div class="signal-panel ${isExpanded ? 'open' : ''}" id="signals-${pid}">
+          ${signalRows}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function toggleSignals(pid) {
+  const panel = document.getElementById(`signals-${pid}`);
+  const toggle = panel?.previousElementSibling;
+  if (!panel) return;
+  panel.classList.toggle('open');
+  toggle?.classList.toggle('open');
+}
+
+// ===========================================================================
+// RENDER: Event log
+// ===========================================================================
+function addEventToLog(event, idResult) {
+  const list = document.getElementById('event-list');
+
+  // Clear empty state on first event
+  if (list.querySelector('.empty-state')) {
+    list.innerHTML = '';
+  }
+
+  const meta = EVENT_META[event.event_type] || { icon: '📌', label: event.event_type, color: '#64748b' };
+  const p = participantState[event.participant_id];
+  const pName = p ? p.display_name : event.participant_id;
+  const time = new Date(event.timestamp * 1000).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  let detail = '';
+  if (event.event_type === 'transcript_segment') {
+    const text = event.data?.text || '';
+    detail = `<div class="event-detail">"${escHtml(text.slice(0, 80))}${text.length > 80 ? '…' : ''}"</div>`;
+  } else if (event.event_type === 'name_change') {
+    detail = `<div class="event-detail">→ "${escHtml(event.data?.new_name || '')}"</div>`;
+  } else if (event.event_type === 'participant_join' && event.data?.email) {
+    detail = `<div class="event-detail">${escHtml(event.data.email)}</div>`;
+  }
+
+  const conf = idResult ? Math.round(idResult.confidence * 100) : 0;
+  const prevConf = Math.round(prevConfidence * 100);
+  const delta = conf - prevConf;
+  let deltaHtml = '';
+  if (idResult && Math.abs(delta) >= 1) {
+    const cls = delta > 0 ? 'up' : delta < 0 ? 'down' : 'same';
+    const arrow = delta > 0 ? '↑' : '↓';
+    deltaHtml = `<span class="conf-delta ${cls}">${arrow}${Math.abs(delta)}%</span>`;
+  }
+  if (idResult) prevConfidence = idResult.confidence;
+
+  const item = document.createElement('div');
+  item.className = 'event-item';
+  item.innerHTML = `
+    <div class="event-top">
+      <span class="event-icon" aria-hidden="true">${meta.icon}</span>
+      <span class="event-type-label" style="color: ${meta.color}">${meta.label}</span>
+      <span class="event-time">${time}</span>
+    </div>
+    <div class="event-participant">${escHtml(pName)}</div>
+    ${detail}
+    ${deltaHtml}
+  `;
+
+  list.insertBefore(item, list.firstChild);
+
+  // Keep max 60 events in log
+  while (list.children.length > 60) {
+    list.removeChild(list.lastChild);
+  }
+}
+
+// ===========================================================================
+// RENDER: Weight legend
+// ===========================================================================
+function renderWeightLegend() {
+  const el = document.getElementById('weight-legend');
+  el.innerHTML = Object.entries(SIGNAL_META).map(([key, meta]) => `
+    <div style="display: grid; grid-template-columns: 110px 1fr 30px; align-items: center; gap: 8px;">
+      <span style="font-size: 11px; color: var(--text-muted);">${meta.label}</span>
+      <div style="height: 4px; background: rgba(255,255,255,0.04); border-radius: 99px; overflow: hidden;">
+        <div style="width: ${meta.weight * 100}%; height: 100%; background: ${meta.color}; border-radius: 99px;"></div>
+      </div>
+      <span style="font-size: 10px; font-weight: 600; color: var(--text-dim); text-align: right;">${Math.round(meta.weight * 100)}%</span>
+    </div>
+  `).join('');
+}
+
+// ===========================================================================
+// UI HELPERS
+// ===========================================================================
+function setConnectionStatus(connected) {
+  const el = document.getElementById('connection-status');
+  el.className = `connection-pill ${connected ? 'connected' : 'disconnected'}`;
+  el.querySelector('span:last-child').textContent = connected ? 'Live' : 'Disconnected';
+}
+
+function updateProgress(pct) {
+  const fill = document.getElementById('progress-fill');
+  fill.style.width = `${pct}%`;
+  const bar = fill.closest('[role=progressbar]');
+  if (bar) bar.setAttribute('aria-valuenow', Math.round(pct));
+}
+
+function resetUI() {
+  if (ws) { ws.close(); ws = null; }
+  participantState = {};
+  idResult = null;
+  prevConfidence = 0;
+  eventCount = 0;
+  speakingParticipants.clear();
+
+  document.getElementById('participants-grid').innerHTML = `
+    <div class="empty-state">
+      <div class="empty-icon">👤</div>
+      <div class="empty-title">No participants yet</div>
+      <div class="empty-sub">Select a scenario and click Run Demo</div>
+    </div>`;
+  document.getElementById('event-list').innerHTML = `
+    <div class="empty-state">
+      <div class="empty-icon">📡</div>
+      <div class="empty-sub">Events will stream here in real-time</div>
+    </div>`;
+  document.getElementById('id-result-card').className = 'id-result-card unknown';
+  document.getElementById('id-result-card').innerHTML = `
+    <div class="id-status-row">
+      <span class="id-status-icon">⏳</span>
+      <span class="id-status-label" style="color: var(--text-muted)">Waiting</span>
+    </div>
+    <div style="font-size: 12px; color: var(--text-muted)">Start a scenario to begin identification</div>`;
+  document.getElementById('context-card').innerHTML = `
+    <div class="empty-state" style="padding: 20px">
+      <div class="empty-icon">📋</div>
+      <div class="empty-sub">Run a scenario to see meeting context</div>
+    </div>`;
+  document.getElementById('stat-events').textContent = '0';
+  document.getElementById('stat-participants').textContent = '0';
+  document.getElementById('stat-confidence').textContent = '—';
+  document.getElementById('event-count-badge').textContent = '0';
+  document.getElementById('participants-count').textContent = '';
+  updateProgress(0);
+  setConnectionStatus(false);
+}
+
+function toast(message, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtDur(s) {
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
+}
+
+function hashCode(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h) + str.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+</script>
+</body>
+</html>
