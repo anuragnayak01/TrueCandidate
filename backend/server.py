@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from engine import CandidateIdentificationEngine
-from models import MeetingContext, MeetingEvent
+from models import MeetingContext, MeetingEvent, EventType
 from scenarios import SCENARIOS, get_scenario_events, list_scenarios
 # ---------------------------------------------------------------------------
 # App setup
