@@ -71,13 +71,16 @@ async def start_meeting(body: dict):
     Body: { "scenario": "happy_path" }
           OR custom context via { "context": {...}, "events": [...] }
     """
-    meeting_id = str(uuid.uuid4())[:8]
     scenario_key = body.get("scenario")
     if scenario_key and scenario_key in SCENARIOS:
+        meeting_id = str(uuid.uuid4())[:8]
         context, events = get_scenario_events(scenario_key, base_time=time.time())
     else:
-        # Custom context
+        # Custom context — use the caller's meeting_id if provided (e.g. a real
+        # Zoom meeting ID), so this session lines up with the one the Zoom
+        # webhook will auto-create when events start arriving for that meeting.
         raw_ctx = body.get("context", {})
+        meeting_id = str(raw_ctx.get("meeting_id") or uuid.uuid4().hex[:8])
         context = MeetingContext(
             meeting_id=meeting_id,
             candidate_name=raw_ctx.get("candidate_name", ""),
