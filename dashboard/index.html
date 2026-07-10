@@ -214,6 +214,53 @@
     <div class="status-line"><span class="dot" id="statusDot"></span><span id="statusText">Awaiting case file</span></div>
   </header>
 
+  <div class="intake" id="newCase">
+    <h2>New Case Intake</h2>
+    <div class="intake-grid">
+      <div class="field">
+        <label for="ic_meetingId">Zoom Meeting ID</label>
+        <input id="ic_meetingId" type="text" placeholder="Must match the real Zoom meeting ID — webhook events are routed by this ID" />
+      </div>
+      <div class="field">
+        <label for="ic_candidateName">Candidate Name *</label>
+        <input id="ic_candidateName" type="text" placeholder="e.g. Sarah Chen" />
+      </div>
+      <div class="field">
+        <label for="ic_candidateEmail">Candidate Email *</label>
+        <input id="ic_candidateEmail" type="email" placeholder="sarah.chen@gmail.com" />
+      </div>
+      <div class="field">
+        <label for="ic_jobTitle">Job Title</label>
+        <input id="ic_jobTitle" type="text" placeholder="e.g. Senior ML Engineer" />
+      </div>
+      <div class="field">
+        <label for="ic_company">Company</label>
+        <input id="ic_company" type="text" placeholder="e.g. Acme Corp" />
+      </div>
+      <div class="field">
+        <label for="ic_interviewerNames">Interviewer Name(s)</label>
+        <input id="ic_interviewerNames" type="text" placeholder="Comma-separated: Alex Rivera, Jordan Kim" />
+      </div>
+      <div class="field">
+        <label for="ic_interviewerEmails">Interviewer Email(s)</label>
+        <input id="ic_interviewerEmails" type="text" placeholder="Comma-separated: alex@acme.com, jordan@acme.com" />
+      </div>
+      <div class="field">
+        <label for="ic_photo">Candidate Photo (face enrollment)</label>
+        <input id="ic_photo" type="file" accept="image/*" />
+      </div>
+      <div class="field">
+        <label for="ic_audio">Candidate Voice Clip — ~20s (voice enrollment)</label>
+        <input id="ic_audio" type="file" accept="audio/*" />
+      </div>
+    </div>
+    <div class="intake-actions">
+      <button class="btn-primary" id="createCaseBtn">Create Case File</button>
+      <span class="intake-note" id="createCaseNote"></span>
+    </div>
+    <div class="intake-note" id="enrollResult" style="margin-top:10px;"></div>
+  </div>
+
   <div class="intake" id="intake">
     <h2>Open Case File</h2>
     <div class="intake-grid">
@@ -261,6 +308,11 @@
   const dossierList = $('dossierList');
   const mismatchBanner = $('mismatchBanner');
   const mismatchText = $('mismatchText');
+
+  // New Case Intake form elements
+  const createCaseBtn = $('createCaseBtn');
+  const createCaseNote = $('createCaseNote');
+  const enrollResult = $('enrollResult');
 
   // Restore last-used values for convenience
   try{
@@ -383,6 +435,117 @@
     setStatus('', 'Awaiting case file');
   }
 
+  // ------------------------------------------------------------------
+  // New Case Intake
+  // ------------------------------------------------------------------
+
+  function splitList(str){
+    return str.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  // Reads a File and resolves to raw base64 (the data: URL prefix stripped —
+  // the backend's photo_b64/audio_b64 fields expect just the base64 body,
+  // matching how EnrollRequest / api_enroll_biometrics decode it).
+  function fileToBase64(file){
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result || '';
+        const commaIdx = result.indexOf(',');
+        resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+      };
+      reader.onerror = () => reject(new Error('Could not read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function createCase(){
+    const meetingIdInput = $('ic_meetingId').value.trim();
+    const candidateName = $('ic_candidateName').value.trim();
+    const candidateEmail = $('ic_candidateEmail').value.trim();
+    const jobTitle = $('ic_jobTitle').value.trim();
+    const company = $('ic_company').value.trim();
+    const interviewerNames = splitList($('ic_interviewerNames').value);
+    const interviewerEmails = splitList($('ic_interviewerEmails').value);
+    const photoFile = $('ic_photo').files[0] || null;
+    const audioFile = $('ic_audio').files[0] || null;
+
+    if(!candidateName || !candidateEmail){
+      createCaseNote.textContent = 'Candidate name and email are required.';
+      return;
+    }
+
+    createCaseBtn.disabled = true;
+    createCaseNote.textContent = 'Creating case file…';
+    enrollResult.textContent = '';
+
+    try{
+      // Step 1: create the meeting/case context.
+      // NOTE: if this candidate is being interviewed over real Zoom, the
+      // meeting ID here MUST match the Zoom meeting ID your webhook will
+      // send events for — that's how incoming webhook events get routed to
+      // this session. Leave it blank only for testing / non-Zoom flows,
+      // since the backend will generate a random ID that Zoom's webhook
+      // will never actually reference.
+      const payload = {
+        candidate_name: candidateName,
+        candidate_email: candidateEmail,
+        interviewer_names: interviewerNames,
+        interviewer_emails: interviewerEmails,
+        job_title: jobTitle,
+        company: company,
+      };
+      if(meetingIdInput) payload.meeting_id = meetingIdInput;
+
+      const res = await fetch(`${httpBase()}/api/meeting/live`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      if(!res.ok) throw new Error(`Server returned ${res.status} while creating the case`);
+      const data = await res.json();
+      const newMeetingId = data.meeting_id;
+
+      // Step 2: biometric enrollment, only if a photo and/or audio file was
+      // provided — both are optional. Uses the existing single-shot
+      // /enroll endpoint (validates + extracts + discards raw bytes
+      // server-side; see api_enroll_biometrics docstring in server.py).
+      if(photoFile || audioFile){
+        createCaseNote.textContent = 'Case created — enrolling biometrics…';
+        const enrollPayload = {};
+        if(photoFile) enrollPayload.photo_b64 = await fileToBase64(photoFile);
+        if(audioFile) enrollPayload.audio_b64 = await fileToBase64(audioFile);
+
+        const enrollRes = await fetch(`${httpBase()}/api/meeting/${encodeURIComponent(newMeetingId)}/enroll`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(enrollPayload),
+        });
+        const enrollData = await enrollRes.json();
+
+        const parts = [];
+        parts.push(enrollData.face_enrolled ? '✅ Face enrolled' : (photoFile ? '⚠️ Face NOT enrolled' : ''));
+        parts.push(enrollData.voice_enrolled ? '✅ Voice enrolled' : (audioFile ? '⚠️ Voice NOT enrolled' : ''));
+        if(Array.isArray(enrollData.errors) && enrollData.errors.length){
+          parts.push(...enrollData.errors.map(e => '⚠️ ' + e));
+        }
+        enrollResult.textContent = parts.filter(Boolean).join('  ·  ');
+      }
+
+      createCaseNote.textContent = `Case created — Meeting ID: ${newMeetingId}`;
+
+      // Convenience: carry the new meeting ID straight into the "Open Case
+      // File" form below so the recruiter can immediately start tracking
+      // it, without retyping anything.
+      $('meetingId').value = newMeetingId;
+      try{ localStorage.setItem('sherlock_meeting_id', newMeetingId); }catch(e){}
+    }catch(err){
+      createCaseNote.textContent = err.message || 'Could not create case file.';
+    }finally{
+      createCaseBtn.disabled = false;
+    }
+  }
+
   function renderAll(){
     if(!currentContext) return;
 
@@ -487,6 +650,7 @@
     return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  createCaseBtn.addEventListener('click', createCase);
   connectBtn.addEventListener('click', openCase);
   disconnectBtn.addEventListener('click', closeCase);
   $('meetingId').addEventListener('keydown', (e) => { if(e.key === 'Enter') openCase(); });
