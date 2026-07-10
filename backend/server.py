@@ -19,20 +19,34 @@ frontend (frontend/index.html) already expects:
 
 Live (non-scenario) ingestion for meet_bot/gmeet_bot.py and zoom_bot.py is
 also included via POST /api/meeting/live and POST /api/meeting/{id}/event,
-so real bots have somewhere to send events — this did not exist before.
+so real bots have somewhere to send events.
+
+GET /api/meeting/{meeting_id} exposes current context + engine state for
+polling clients (the dashboard) that don't go through the WebSocket.
+
+POST /api/zoom/webhook receives Zoom App Marketplace Event Subscriptions
+("all meeting events" subscribed). It is authoritative for
+participant_join/participant_leave — meet_bot/zoom_bot.py's DOM-scraping
+bot deliberately no longer reports join/leave (see zoom_bot.py comments)
+to avoid double-counting participants under two different ID schemes. The
+webhook and the bot agree on participant_id via `stable_pid()`, a
+deterministic hash of the display name, so events from either source land
+on the same ParticipantState.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import logging
 import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -57,6 +71,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def stable_pid(name: str) -> str:
+    """
+    Deterministic participant_id derived from display name, shared by
+    zoom_bot.py and the /api/zoom/webhook handler below so that both
+    sources of events for the same human land on the same
+    ParticipantState. Must NOT use Python's built-in hash() — that's
+    randomized per-process (PYTHONHASHSEED) and won't even survive a
+    bot restart, let alone match across the bot and the webhook process.
+    """
+    norm = name.strip().lower()
+    return f"zoom-{hashlib.md5(norm.encode()).hexdigest()[:10]}"
 
 
 class _Session:
@@ -175,7 +202,7 @@ async def api_enroll_biometrics(meeting_id: str, req: EnrollRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Live meeting endpoints (for meet_bot / zoom_bot — did not exist before)
+# Live meeting endpoints (for meet_bot / zoom_bot)
 # ---------------------------------------------------------------------------
 
 class StartLiveMeetingRequest(BaseModel):
@@ -202,8 +229,9 @@ def api_start_live_meeting(req: StartLiveMeetingRequest) -> dict:
     meeting_id = req.meeting_id or f"m-{uuid.uuid4().hex[:10]}"
     if meeting_id in _SESSIONS:
         # Idempotent: a bot may call this more than once for the same
-        # meeting_id (e.g. retry after a dropped connection) — don't
-        # blow away an in-progress session's accumulated state.
+        # meeting_id (e.g. retry after a dropped connection, or a race with
+        # the Zoom webhook's meeting.started event) — don't blow away an
+        # in-progress session's accumulated state.
         return {"meeting_id": meeting_id, "context": _SESSIONS[meeting_id].engine.context.to_dict()}
     context_kwargs = dict(
         meeting_id=meeting_id,
@@ -219,6 +247,19 @@ def api_start_live_meeting(req: StartLiveMeetingRequest) -> dict:
     _SESSIONS[meeting_id] = _Session(context, events=None)
     log.info("started live meeting %s", meeting_id)
     return {"meeting_id": meeting_id, "context": context.to_dict()}
+
+
+@app.get("/api/meeting/{meeting_id}")
+def api_get_meeting(meeting_id: str) -> dict:
+    """Polling alternative to the WebSocket — current context + engine state."""
+    session = _SESSIONS.get(meeting_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Unknown meeting_id")
+    return {
+        "meeting_id": meeting_id,
+        "context": session.engine.context.to_dict(),
+        "state": session.engine.get_state(),
+    }
 
 
 @app.post("/api/meeting/{meeting_id}/event")
@@ -269,6 +310,91 @@ async def api_post_live_event(meeting_id: str, req: LiveEventRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Zoom webhook (Event Subscriptions — "all meeting events" subscribed)
+# ---------------------------------------------------------------------------
+#
+# Authoritative for participant_join / participant_leave. zoom_bot.py's
+# Playwright bot deliberately no longer reports join/leave from the DOM
+# (see zoom_bot.py) — it only reports speaking_start/speaking_end and
+# biometric samples, which Zoom's webhook events don't carry. Both sources
+# agree on participant_id via stable_pid() so events land on the same
+# ParticipantState regardless of which source fires first.
+#
+# Only join/leave are mapped today. Everything else "all meeting events"
+# includes (meeting.started, meeting.ended, sharing, recording, chat, etc.)
+# is acknowledged with 200 but not processed — add entries to
+# _ZOOM_EVENT_MAP as engine.py grows signals that use them.
+
+ZOOM_WEBHOOK_SECRET_TOKEN = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "")
+
+_ZOOM_EVENT_MAP = {
+    "meeting.participant_joined": "participant_join",
+    "meeting.participant_left": "participant_leave",
+}
+
+
+def _verify_zoom_signature(request: Request, raw_body: bytes) -> bool:
+    if not ZOOM_WEBHOOK_SECRET_TOKEN:
+        log.warning("ZOOM_WEBHOOK_SECRET_TOKEN not set — refusing to verify webhook")
+        return False
+    timestamp = request.headers.get("x-zm-request-timestamp", "")
+    signature = request.headers.get("x-zm-signature", "")
+    message = f"v0:{timestamp}:{raw_body.decode()}"
+    computed = hmac.new(
+        ZOOM_WEBHOOK_SECRET_TOKEN.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(f"v0={computed}", signature)
+
+
+@app.post("/api/zoom/webhook")
+async def api_zoom_webhook(request: Request) -> dict:
+    raw_body = await request.body()
+    body = await request.json()
+    event = body.get("event", "")
+
+    # Zoom's one-time CRC handshake, fired when you (re)save the Event
+    # Subscription URL in the App Marketplace. Must be answered correctly
+    # or Zoom disables the subscription — this is NOT signature-verified
+    # the normal way, it uses the plainToken directly.
+    if event == "endpoint.url_validation":
+        if not ZOOM_WEBHOOK_SECRET_TOKEN:
+            log.warning("ZOOM_WEBHOOK_SECRET_TOKEN not set — cannot answer CRC handshake")
+            raise HTTPException(status_code=500, detail="webhook secret not configured")
+        plain_token = body.get("payload", {}).get("plainToken", "")
+        encrypted = hmac.new(
+            ZOOM_WEBHOOK_SECRET_TOKEN.encode(), plain_token.encode(), hashlib.sha256
+        ).hexdigest()
+        return {"plainToken": plain_token, "encryptedToken": encrypted}
+
+    if not _verify_zoom_signature(request, raw_body):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    payload = body.get("payload", {}).get("object", {})
+    zoom_meeting_id = str(payload.get("id", ""))
+    session = _SESSIONS.get(zoom_meeting_id)
+    if not session:
+        # Webhook arrived before /api/meeting/live created the session
+        # (or for a meeting Sherlock isn't tracking) — nothing to do yet.
+        log.info("zoom webhook for untracked meeting %s (event=%s)", zoom_meeting_id, event)
+        return {"status": "ignored", "reason": "unknown meeting_id"}
+
+    mapped = _ZOOM_EVENT_MAP.get(event)
+    if not mapped:
+        log.info("zoom webhook event %s not mapped — acked, not processed", event)
+        return {"status": "acked", "processed": False}
+
+    participant = payload.get("participant", {})
+    display_name = participant.get("user_name", "")
+    pid = stable_pid(display_name) if display_name else f"zoom-{participant.get('id', 'unknown')}"
+    data = {"display_name": display_name}
+
+    event_obj = MeetingEvent(event_type=EventType(mapped), participant_id=pid, data=data)
+    result = session.engine.process_event(event_obj)
+    await _broadcast(session, event_obj, result)
+    return {"status": "processed", "identification": result.to_dict()}
+
+
+# ---------------------------------------------------------------------------
 # WebSocket — streams identification updates to the dashboard
 # ---------------------------------------------------------------------------
 
@@ -304,7 +430,7 @@ async def ws_meeting(websocket: WebSocket, meeting_id: str) -> None:
     try:
         if session.live:
             # Live meeting: just keep the socket open, events arrive via
-            # POST /api/meeting/{id}/event from meet_bot/zoom_bot and get
+            # POST /api/meeting/{id}/event or POST /api/zoom/webhook and get
             # pushed out by _broadcast(). Read (and discard) any client
             # pings so we notice disconnects.
             while True:
