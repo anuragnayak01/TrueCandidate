@@ -184,29 +184,28 @@ class ZoomBot:
             return
         try:
             r = await self.http.post(
-                f"{self.sherlock_url}/api/meeting/start",
+                f"{self.sherlock_url}/api/meeting/live",
                 json={
-                    "context": {
-                        "meeting_id": self.meeting_id,
-                        "candidate_name":  self.candidate_name,
-                        "candidate_email": self.candidate_email,
-                        "interviewer_names":  self.interviewers,
-                        "interviewer_emails": [],
-                    }
+                    "meeting_id": self.meeting_id,
+                    "candidate_name":  self.candidate_name,
+                    "candidate_email": self.candidate_email,
+                    "interviewer_names":  self.interviewers,
+                    "interviewer_emails": [],
                 },
             )
             if r.status_code == 200:
                 self._session_created = True
                 print(f"[ZoomBot] Sherlock session ready")
+            else:
+                print(f"[ZoomBot] Session create failed: {r.status_code} {r.text}")
         except Exception as e:
             print(f"[ZoomBot] Session create failed: {e}")
 
     async def _send_event(self, event_type: str, pid: str, data: dict | None = None):
         try:
             await self.http.post(
-                f"{self.sherlock_url}/api/event/{self.meeting_id}",
-                json={"event_type": event_type, "participant_id": pid,
-                      "timestamp": time.time(), "data": data or {}},
+                f"{self.sherlock_url}/api/meeting/{self.meeting_id}/event",
+                json={"event_type": event_type, "participant_id": pid, "data": data or {}},
             )
         except Exception as e:
             print(f"[ZoomBot] Send failed: {e}")
