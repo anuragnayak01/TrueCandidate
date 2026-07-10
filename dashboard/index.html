@@ -405,7 +405,7 @@
     try{
       const data = await fetchState(meetingId);
       currentContext = data.context;
-      currentState = data;
+      currentState = data.state;
       // Best-effort: the snapshot endpoint may nest identification under
       // `identification`, or may not include it at all yet (if no events
       // have fired). Either way this degrades gracefully — the banner
