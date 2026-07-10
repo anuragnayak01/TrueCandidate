@@ -6,3 +6,10 @@ rapidfuzz>=3.6.1
 httpx>=0.27.0
 playwright>=1.44.0
 python-dotenv>=1.0.0
+
+# Biometric signal extraction (backend/biometrics.py) — lightweight,
+# offline, no external model downloads required at install or runtime.
+opencv-python-headless>=4.9.0
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.26.0
