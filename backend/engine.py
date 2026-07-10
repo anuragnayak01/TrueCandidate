@@ -152,6 +152,19 @@ class CandidateIdentificationEngine:
             if pid in self.participants:
                 self.participants[pid].webcam_on = False
 
+        elif event.event_type == EventType.FACE_SAMPLE:
+            if pid in self.participants:
+                p = self.participants[pid]
+                p.latest_face_embedding = event.data.get("embedding")
+                p.latest_face_liveness_ok = event.data.get("liveness_ok", True)
+                p.last_face_sample_time = now
+
+        elif event.event_type == EventType.VOICE_SAMPLE:
+            if pid in self.participants:
+                p = self.participants[pid]
+                p.latest_voice_embedding = event.data.get("embedding")
+                p.last_voice_sample_time = now
+
     # ------------------------------------------------------------------
     # Signal recomputation
     # ------------------------------------------------------------------
@@ -204,8 +217,21 @@ class CandidateIdentificationEngine:
 
         best_participant = self.participants[best_id]
 
+        # Cross-modal biometric disagreement — checked independently of the
+        # ranking/ambiguity logic above, and NOT blended into composite_score.
+        # Face and voice contradicting each other is escalated as its own
+        # flag rather than averaged into a merely-lower confidence, since
+        # that's a fundamentally different situation (possible impersonation)
+        # than one weak signal being unsure.
+        mismatch, mismatch_pid, mismatch_reason = self._check_identity_mismatch(active)
+
         # Build explanation from top signals
         explanation = self._build_explanation(best_participant, best_prob, is_ambiguous)
+        if mismatch:
+            explanation.insert(
+                0,
+                f"🚨 IDENTITY MISMATCH: {mismatch_reason}",
+            )
 
         # Signal breakdown per participant
         signal_breakdown = {
@@ -225,7 +251,51 @@ class CandidateIdentificationEngine:
             signal_breakdown=signal_breakdown,
             event_count=self._event_count,
             timestamp=time.time(),
+            identity_mismatch=mismatch,
+            identity_mismatch_participant_id=mismatch_pid,
+            identity_mismatch_reason=mismatch_reason,
         )
+
+    def _check_identity_mismatch(
+        self, active: List[ParticipantState]
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        """
+        Hard-trigger check, separate from the weighted-average fusion above.
+
+        If a participant's Face Match and Voice Match signals are BOTH
+        confident (signal_confidence high enough to trust) but strongly
+        DISAGREE — one says "this is the enrolled candidate," the other says
+        "this is not" — that is treated as a fraud flag, not just uncertainty.
+        A single weak/unsure signal is normal and handled by the blended
+        composite score; two independent biometric channels actively
+        contradicting each other is not, and deserves to be surfaced loudly.
+        """
+        MATCH = 0.70
+        NO_MATCH = 0.35
+        CONF_FLOOR = 0.5
+
+        for p in active:
+            face = p.signals.get(SignalType.FACE_MATCH)
+            voice = p.signals.get(SignalType.VOICE_MATCH)
+            if not face or not voice:
+                continue
+            if face.signal_confidence < CONF_FLOOR or voice.signal_confidence < CONF_FLOOR:
+                continue  # not enough trust in either channel to compare them
+
+            face_says_match = face.score >= MATCH
+            face_says_no_match = face.score <= NO_MATCH
+            voice_says_match = voice.score >= MATCH
+            voice_says_no_match = voice.score <= NO_MATCH
+
+            if (face_says_match and voice_says_no_match) or (face_says_no_match and voice_says_match):
+                reason = (
+                    f"'{p.display_name}' — face and voice biometrics disagree "
+                    f"(face={face.score:.2f}, voice={voice.score:.2f}). "
+                    f"Possible impersonation or spoofed feed."
+                )
+                return True, p.participant_id, reason
+
+        return False, None, None
 
     def _build_explanation(
         self,
