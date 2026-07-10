@@ -111,6 +111,31 @@
   }
   .meta-strip b{color:var(--text); font-weight:600;}
 
+  /* ---------- Identity mismatch banner ----------
+     Deliberately its own top-level block, not folded into a dossier card:
+     this mirrors the backend's design intent (engine.py's
+     _check_identity_mismatch is a hard-triggered flag, separate from the
+     blended composite score) — so visually it should read as a distinct
+     alert sitting above the case board, not as "one dossier looking worse." */
+  .mismatch-banner{
+    display:none;
+    align-items:flex-start; gap:12px;
+    background:rgba(179,68,30,0.16); border:1px solid var(--rust); border-radius:6px;
+    padding:14px 18px; margin-bottom:22px;
+    animation:mismatch-pulse 1.6s ease-in-out infinite;
+  }
+  .mismatch-banner.active{display:flex;}
+  .mismatch-banner .mm-icon{font-size:20px; line-height:1; flex-shrink:0;}
+  .mismatch-banner .mm-body{font-family:var(--mono); font-size:12.5px; color:var(--text); line-height:1.6;}
+  .mismatch-banner .mm-title{
+    font-weight:700; letter-spacing:1.5px; text-transform:uppercase; font-size:11px;
+    color:var(--rust); display:block; margin-bottom:4px;
+  }
+  @keyframes mismatch-pulse{
+    0%,100%{box-shadow:0 0 0 rgba(179,68,30,0);}
+    50%{box-shadow:0 0 18px rgba(179,68,30,0.45);}
+  }
+
   .empty-state{
     text-align:center; padding:60px 20px; color:var(--text-dim);
     font-family:var(--mono); font-size:13px; border:1px dashed var(--rule); border-radius:6px;
@@ -210,6 +235,13 @@
 
   <div class="board" id="board">
     <div class="meta-strip" id="metaStrip"></div>
+    <div class="mismatch-banner" id="mismatchBanner">
+      <span class="mm-icon">🚨</span>
+      <div class="mm-body">
+        <span class="mm-title">Identity Mismatch</span>
+        <span id="mismatchText"></span>
+      </div>
+    </div>
     <div id="dossierList"></div>
   </div>
 
@@ -227,6 +259,8 @@
   const board = $('board');
   const metaStrip = $('metaStrip');
   const dossierList = $('dossierList');
+  const mismatchBanner = $('mismatchBanner');
+  const mismatchText = $('mismatchText');
 
   // Restore last-used values for convenience
   try{
@@ -240,8 +274,21 @@
   let currentMeetingId = null;
   let currentContext = null;
   let currentState = { participants: {}, event_count: 0 };
+  // Latest IdentificationResult, tracked separately from currentState since
+  // engine.get_state() (which currentState mirrors) does not carry
+  // identity_mismatch — that only comes through on the "identification"
+  // field of each meeting_event WS message / the initial snapshot fetch.
+  let currentIdentification = null;
 
-  const SIGNAL_ORDER = ['name_match','email_match','interviewer_exclusion','speaking_pattern','transcript_language','join_order','screen_share'];
+  // Full 9-signal order, weight-descending — matches backend/models.py
+  // SIGNAL_WEIGHTS exactly. Previously only had the original 7 signals,
+  // which silently hid face_match/voice_match (the two highest-weighted
+  // signals, 35%+22% of the composite score) from this dashboard even
+  // though the backend was computing them the whole time.
+  const SIGNAL_ORDER = [
+    'face_match','voice_match','email_match','interviewer_exclusion',
+    'name_match','speaking_pattern','transcript_language','join_order','screen_share'
+  ];
 
   function setStatus(mode, text){
     statusDot.className = 'dot' + (mode ? ' ' + mode : '');
@@ -281,6 +328,7 @@
         renderAll();
       } else if(msg.type === 'meeting_event'){
         currentState = msg.state || currentState;
+        if(msg.identification) currentIdentification = msg.identification;
         renderAll();
       } else if(msg.type === 'error'){
         setStatus('err', msg.message || 'Server error');
@@ -306,6 +354,11 @@
       const data = await fetchState(meetingId);
       currentContext = data.context;
       currentState = data;
+      // Best-effort: the snapshot endpoint may nest identification under
+      // `identification`, or may not include it at all yet (if no events
+      // have fired). Either way this degrades gracefully — the banner
+      // simply stays hidden until the first WS meeting_event arrives.
+      currentIdentification = data.identification || null;
       currentMeetingId = meetingId;
 
       board.classList.add('active');
@@ -324,6 +377,7 @@
   function closeCase(){
     if(ws){ ws.close(); ws = null; }
     currentMeetingId = null;
+    currentIdentification = null;
     board.classList.remove('active');
     disconnectBtn.style.display = 'none';
     setStatus('', 'Awaiting case file');
@@ -339,6 +393,16 @@
       <div>Meeting ID: <b>${escapeHtml(ctx.meeting_id || currentMeetingId)}</b></div>
       <div>Events observed: <b>${currentState.event_count ?? 0}</b></div>
     `;
+
+    // Identity mismatch — hard-triggered alert, rendered independently of
+    // the per-participant dossier cards below it (see .mismatch-banner
+    // comment in <style> for why it's not folded into a dossier).
+    if(currentIdentification && currentIdentification.identity_mismatch){
+      mismatchText.textContent = currentIdentification.identity_mismatch_reason || 'Face and voice biometrics disagree for a participant.';
+      mismatchBanner.classList.add('active');
+    } else {
+      mismatchBanner.classList.remove('active');
+    }
 
     const participants = Object.values(currentState.participants || {});
     if(participants.length === 0){
