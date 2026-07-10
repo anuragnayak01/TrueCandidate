@@ -25,6 +25,8 @@ class EventType(str, Enum):
     NAME_CHANGE = "name_change"
     WEBCAM_ON = "webcam_on"
     WEBCAM_OFF = "webcam_off"
+    FACE_SAMPLE = "face_sample"    # data: {"embedding": [...], "liveness_ok": bool}
+    VOICE_SAMPLE = "voice_sample"  # data: {"embedding": [...]}
 
 
 class SignalType(str, Enum):
@@ -35,23 +37,37 @@ class SignalType(str, Enum):
     TRANSCRIPT_LANGUAGE = "transcript_language"
     JOIN_ORDER = "join_order"
     SCREEN_SHARE = "screen_share"
+    FACE_MATCH = "face_match"
+    VOICE_MATCH = "voice_match"
 
 
 # ---------------------------------------------------------------------------
 # Signal weights (must sum to 1.0)
 # ---------------------------------------------------------------------------
 
+# Weights below reflect a deliberate design choice: face/voice are biometric
+# identity anchors (hard to spoof, immune to name/device changes) so they
+# carry the majority of the weight — but they are still BLENDED into the
+# same weighted average as every other signal, not a hard override. A bad
+# frame or noisy audio sample degrades gracefully via signal_confidence
+# rather than being able to unilaterally flip the decision. See engine.py
+# for the one deliberate exception: cross-modal (face vs voice) disagreement
+# is escalated as a separate IDENTITY_MISMATCH flag rather than blended away.
 SIGNAL_WEIGHTS: Dict[SignalType, float] = {
-    SignalType.EMAIL_MATCH: 0.30,
-    SignalType.INTERVIEWER_EXCLUSION: 0.25,
-    SignalType.NAME_MATCH: 0.20,
-    SignalType.SPEAKING_PATTERN: 0.12,
-    SignalType.TRANSCRIPT_LANGUAGE: 0.07,
-    SignalType.JOIN_ORDER: 0.04,
-    SignalType.SCREEN_SHARE: 0.02,
+    SignalType.FACE_MATCH: 0.35,
+    SignalType.VOICE_MATCH: 0.22,
+    SignalType.EMAIL_MATCH: 0.13,
+    SignalType.INTERVIEWER_EXCLUSION: 0.11,
+    SignalType.NAME_MATCH: 0.09,
+    SignalType.SPEAKING_PATTERN: 0.05,
+    SignalType.TRANSCRIPT_LANGUAGE: 0.03,
+    SignalType.JOIN_ORDER: 0.015,
+    SignalType.SCREEN_SHARE: 0.005,
 }
 
 SIGNAL_LABELS: Dict[SignalType, str] = {
+    SignalType.FACE_MATCH: "Face Match",
+    SignalType.VOICE_MATCH: "Voice Match",
     SignalType.EMAIL_MATCH: "Email Match",
     SignalType.INTERVIEWER_EXCLUSION: "Interviewer Exclusion",
     SignalType.NAME_MATCH: "Name Match",
@@ -97,6 +113,13 @@ class MeetingContext:
     job_title: str = ""
     company: str = "Acme Corp"
 
+    # Pre-meeting biometric references, extracted once during enrollment
+    # (candidate photo + ~20s voice clip) and delivered to the meeting bot
+    # for the duration of this interview only — never persisted longer than
+    # that. See README "Biometric enrollment" section for the full pipeline.
+    candidate_face_embedding: Optional[List[float]] = None
+    candidate_voice_embedding: Optional[List[float]] = None
+
     def to_dict(self) -> dict:
         return {
             "meeting_id": self.meeting_id,
@@ -106,6 +129,10 @@ class MeetingContext:
             "interviewer_emails": self.interviewer_emails,
             "job_title": self.job_title,
             "company": self.company,
+            # Never serialize the raw vectors to the client — only whether
+            # a biometric reference was successfully enrolled pre-meeting.
+            "has_face_reference": self.candidate_face_embedding is not None,
+            "has_voice_reference": self.candidate_voice_embedding is not None,
         }
 
 
@@ -163,6 +190,16 @@ class ParticipantState:
     is_active: bool = True
     name_history: List[str] = field(default_factory=list)
 
+    # Most recent biometric samples captured for this participant. These
+    # are overwritten (not accumulated) — the signal only ever compares
+    # against the freshest frame/clip, it doesn't try to average over time.
+    latest_face_embedding: Optional[List[float]] = None
+    latest_face_liveness_ok: bool = True
+    last_face_sample_time: Optional[float] = None
+
+    latest_voice_embedding: Optional[List[float]] = None
+    last_voice_sample_time: Optional[float] = None
+
     # Rolling signal results — updated on every event
     signals: Dict[SignalType, SignalResult] = field(default_factory=dict)
 
@@ -199,6 +236,9 @@ class ParticipantState:
             "is_active": self.is_active,
             "name_history": self.name_history,
             "transcript_word_count": sum(len(s.split()) for s in self.transcript_segments),
+            "has_face_sample": self.latest_face_embedding is not None,
+            "face_liveness_ok": self.latest_face_liveness_ok,
+            "has_voice_sample": self.latest_voice_embedding is not None,
             "signals": {k.value: v.to_dict() for k, v in self.signals.items()},
             "composite_score": round(self.composite_score, 4),
         }
@@ -222,6 +262,16 @@ class IdentificationResult:
     event_count: int
     timestamp: float = field(default_factory=time.time)
 
+    # Cross-modal biometric disagreement (face says yes, voice says no, or
+    # vice versa — both at high confidence). This is deliberately NOT folded
+    # into the weighted-average score: two independent biometric channels
+    # contradicting each other is a different kind of event than one signal
+    # being unsure, so it's surfaced as its own hard-triggered flag instead
+    # of being averaged away. See engine.py `_check_identity_mismatch`.
+    identity_mismatch: bool = False
+    identity_mismatch_participant_id: Optional[str] = None
+    identity_mismatch_reason: Optional[str] = None
+
     CONFIDENCE_LOCKED_THRESHOLD = 0.85
 
     @property
@@ -242,4 +292,7 @@ class IdentificationResult:
             "signal_breakdown": self.signal_breakdown,
             "event_count": self.event_count,
             "timestamp": self.timestamp,
+            "identity_mismatch": self.identity_mismatch,
+            "identity_mismatch_participant_id": self.identity_mismatch_participant_id,
+            "identity_mismatch_reason": self.identity_mismatch_reason,
         }
