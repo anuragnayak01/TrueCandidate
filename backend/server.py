@@ -1,321 +1,351 @@
 """
-server.py — FastAPI + WebSocket server for the Sherlock prototype.
-Endpoints
----------
-GET  /api/scenarios                 → list available demo scenarios
-POST /api/meeting/start             → start a new meeting / demo scenario
-POST /api/event/{meeting_id}        → inject a single event (used by bots)
-GET  /api/meeting/{meeting_id}      → current engine state snapshot
-POST /api/zoom/webhook              → Zoom webhook receiver (free developer account)
-WS   /ws/{meeting_id}              → real-time event stream
-WebSocket message types (server → client)
-------------------------------------------
-  { "type": "connected",      "meeting_id": "..." }
-  { "type": "meeting_event",  "event": {...}, "identification": {...}, "state": {...} }
-  { "type": "scenario_complete" }
-  { "type": "error",          "message": "..." }
+server.py — Sherlock candidate-identification backend.
+
+This is the actual FastAPI app. It was previously missing entirely — this
+file used to contain a static dashboard HTML page (moved to
+`local_dashboard.html` for local reference), while `Dockerfile` /
+`render.yaml` / `fly.toml` all pointed `python server.py` at it as the
+entrypoint. Nothing in the repo ever called `engine.process_event()`.
+
+This wires the existing `CandidateIdentificationEngine` (engine.py),
+`MeetingContext` / `MeetingEvent` (models.py), and the demo scenarios
+(scenarios.py) to the HTTP + WebSocket contract the deployed Vercel
+frontend (frontend/index.html) already expects:
+
+    GET  /api/scenarios          -> list of demo scenarios
+    POST /api/meeting/start      -> {scenario} -> {meeting_id, context}
+    WS   /ws/{meeting_id}        -> streams meeting_event / scenario_complete
+    GET  /api/health             -> health check (render.yaml healthCheckPath)
+
+Live (non-scenario) ingestion for meet_bot/gmeet_bot.py and zoom_bot.py is
+also included via POST /api/meeting/live and POST /api/meeting/{id}/event,
+so real bots have somewhere to send events — this did not exist before.
 """
+
 from __future__ import annotations
-import os
+
 import asyncio
-import json
+import base64
+import logging
+import os
 import time
 import uuid
-from typing import Dict, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import biometrics
 from engine import CandidateIdentificationEngine
-from models import MeetingContext, MeetingEvent, EventType
+from models import EventType, MeetingContext, MeetingEvent
 from scenarios import SCENARIOS, get_scenario_events, list_scenarios
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
-app = FastAPI(title="Sherlock Candidate Identification API", version="1.0.0")
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("sherlock.server")
+
+app = FastAPI(title="Sherlock Candidate Identification Engine")
+
+# Vercel (dashboard) and Render (this API) are different origins, so this
+# needs real CORS — the frontend's same-origin assumption
+# (`window.location.origin`) only holds if they're on one domain. Tighten
+# `allow_origins` to the exact Vercel URL before shipping this for real.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ---------------------------------------------------------------------------
-# In-memory session store
-# ---------------------------------------------------------------------------
-class MeetingSession:
-    def __init__(self, meeting_id: str, context: MeetingContext):
-        self.meeting_id = meeting_id
+
+
+class _Session:
+    """One live meeting: an engine instance plus (for scenario runs) the
+    pre-built event timeline to replay over the WebSocket."""
+
+    def __init__(self, context: MeetingContext, events: Optional[List[MeetingEvent]] = None,
+                 speed: float = 8.0) -> None:
         self.engine = CandidateIdentificationEngine(context)
-        self.connections: List[WebSocket] = []
-        self.is_running = False
-        self.task: Optional[asyncio.Task] = None
-    async def broadcast(self, payload: dict):
-        dead = []
-        for ws in self.connections:
-            try:
-                await ws.send_text(json.dumps(payload))
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.connections.remove(ws)
-_sessions: Dict[str, MeetingSession] = {}
+        self.events = events or []
+        self.speed = speed
+        self.live = events is None  # True for meet_bot/zoom_bot-fed meetings
+        self.subscribers: List[WebSocket] = []
+        self.created_at = time.time()
+        # Previous face embedding per participant, kept here (not on
+        # ParticipantState) purely to support the frame-to-frame liveness
+        # heuristic in biometrics.check_liveness — it's session/transport
+        # state, not identification state.
+        self._prev_face_embedding: Dict[str, List[float]] = {}
+
+
+_SESSIONS: Dict[str, _Session] = {}
+
+
 # ---------------------------------------------------------------------------
-# Routes
+# Scenario endpoints (used by the demo dashboard)
 # ---------------------------------------------------------------------------
+
+class StartMeetingRequest(BaseModel):
+    scenario: str
+    speed: float = 8.0  # playback-speed multiplier; scenario seconds / speed = real seconds
+
+
 @app.get("/api/scenarios")
-async def get_scenarios():
-    return JSONResponse(list_scenarios())
+def api_list_scenarios() -> List[dict]:
+    return list_scenarios()
+
+
 @app.post("/api/meeting/start")
-async def start_meeting(body: dict):
+def api_start_meeting(req: StartMeetingRequest) -> dict:
+    if req.scenario not in SCENARIOS:
+        raise HTTPException(status_code=404, detail=f"Unknown scenario '{req.scenario}'")
+
+    context, events = get_scenario_events(req.scenario)
+    meeting_id = f"m-{uuid.uuid4().hex[:10]}"
+    _SESSIONS[meeting_id] = _Session(context, events, speed=req.speed)
+    log.info("started scenario meeting %s (%s, %d events)", meeting_id, req.scenario, len(events))
+    return {"meeting_id": meeting_id, "context": context.to_dict()}
+
+
+class EnrollRequest(BaseModel):
+    photo_b64: Optional[str] = None
+    audio_b64: Optional[str] = None
+
+
+@app.post("/api/meeting/{meeting_id}/enroll")
+async def api_enroll_biometrics(meeting_id: str, req: EnrollRequest) -> dict:
     """
-    Body: { "scenario": "happy_path" }
-          OR custom context via { "context": {...}, "events": [...] }
+    Pre-meeting biometric enrollment (Stage A/B/C from the design doc):
+      A. Collection    — candidate photo + ~20s voice clip, base64-encoded
+      B. Validation     — must actually detect a face / contain real speech,
+                           or this rejects rather than silently enrolling junk
+      C. Extraction      — embeddings computed here, once
+      (D. Delivery is implicit: the embedding is stored on this session's
+          MeetingContext, which the WebSocket/live-event handlers already
+          read from — nothing further to wire up.)
+
+    The raw photo/audio bytes exist only for the duration of this request —
+    they are decoded, embedded, and immediately discarded. Only the
+    embedding vector (a few dozen floats) is retained, and only for the
+    lifetime of this in-memory session.
     """
-    scenario_key = body.get("scenario")
-    if scenario_key and scenario_key in SCENARIOS:
-        meeting_id = str(uuid.uuid4())[:8]
-        context, events = get_scenario_events(scenario_key, base_time=time.time())
-    else:
-        # Custom context — use the caller's meeting_id if provided (e.g. a real
-        # Zoom meeting ID), so this session lines up with the one the Zoom
-        # webhook will auto-create when events start arriving for that meeting.
-        raw_ctx = body.get("context", {})
-        meeting_id = str(raw_ctx.get("meeting_id") or uuid.uuid4().hex[:8])
-        context = MeetingContext(
-            meeting_id=meeting_id,
-            candidate_name=raw_ctx.get("candidate_name", ""),
-            candidate_email=raw_ctx.get("candidate_email", ""),
-            interviewer_names=raw_ctx.get("interviewer_names", []),
-            interviewer_emails=raw_ctx.get("interviewer_emails", []),
-            job_title=raw_ctx.get("job_title", ""),
-            company=raw_ctx.get("company", ""),
-        )
-        events = []
-    session = MeetingSession(meeting_id, context)
-    _sessions[meeting_id] = session
-    # Schedule event playback in background
-    if events:
-        session.task = asyncio.create_task(
-            _play_scenario(session, events)
-        )
-    return JSONResponse({"meeting_id": meeting_id, "context": context.to_dict()})
-@app.get("/api/meeting/{meeting_id}")
-async def get_meeting_state(meeting_id: str):
-    session = _sessions.get(meeting_id)
+    session = _SESSIONS.get(meeting_id)
     if not session:
-        return JSONResponse({"error": "Meeting not found"}, status_code=404)
-    return JSONResponse(session.engine.get_state())
-@app.post("/api/event/{meeting_id}")
-async def inject_event(meeting_id: str, body: dict):
-    """
-    Single-event injection endpoint.
-    Used by the Playwright bots (gmeet_bot.py, zoom_bot.py) to
-    push real meeting events without a WebSocket connection.
-    Body: {
-      "event_type": "participant_join",
-      "participant_id": "p1",
-      "timestamp": 1720000000.0,
-      "data": { "display_name": "Sarah Chen", "email": "..." }
-    }
-    """
-    session = _sessions.get(meeting_id)
-    if not session:
-        return JSONResponse({"error": "Meeting not found"}, status_code=404)
-    try:
-        ev = MeetingEvent(
-            event_type=body["event_type"],
-            participant_id=body["participant_id"],
-            timestamp=body.get("timestamp", time.time()),
-            data=body.get("data", {}),
-        )
-    except (KeyError, ValueError) as e:
-        return JSONResponse({"error": f"Bad event: {e}"}, status_code=400)
-    result = session.engine.process_event(ev)
-    await session.broadcast({
-        "type": "meeting_event",
-        "event": ev.to_dict(),
-        "identification": result.to_dict(),
-        "state": session.engine.get_state(),
-    })
-    return JSONResponse({"status": "ok", "confidence": result.confidence})
-# ---------------------------------------------------------------------------
-# Zoom webhook — free developer account, no paid subscription needed
-# Sign up at: https://marketplace.zoom.us  (use your existing free Zoom account)
-# ---------------------------------------------------------------------------
-import hashlib
-import hmac
-ZOOM_WEBHOOK_SECRET = os.environ.get("ZOOM_WEBHOOK_SECRET", "")
-@app.post("/api/zoom/webhook")
-async def zoom_webhook(request: Request):
-    """
-    Receives Zoom participant events via webhook (free developer app).
-    Setup (one-time, no subscription needed):
-      1. Go to marketplace.zoom.us → Develop → Build App → General App
-      2. Under Feature → Event Subscriptions, add:
-           - meeting.participant_joined
-           - meeting.participant_left
-           - meeting.participant_audio_status_updated
-      3. Set Notification URL to: https://your-domain/api/zoom/webhook
-      4. Set ZOOM_WEBHOOK_SECRET env var from the app's secret token
-    """
-    body_bytes = await request.body()
-    try:
-        body = json.loads(body_bytes)
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    # --- Zoom URL validation challenge (one-time on setup) ---
-    if body.get("event") == "endpoint.url_validation":
-        plain_token = body["payload"]["plainToken"]
-        if ZOOM_WEBHOOK_SECRET:
-            encrypted = hmac.new(
-                ZOOM_WEBHOOK_SECRET.encode(),
-                plain_token.encode(),
-                hashlib.sha256,
-            ).hexdigest()
+        raise HTTPException(status_code=404, detail="Unknown meeting_id")
+
+    result: Dict[str, Any] = {"face_enrolled": False, "voice_enrolled": False, "errors": []}
+
+    if req.photo_b64:
+        try:
+            photo_bytes = base64.b64decode(req.photo_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="photo_b64 is not valid base64")
+        embedding = biometrics.extract_face_embedding(photo_bytes)
+        if embedding is None:
+            result["errors"].append(
+                "No face detected in enrollment photo — rejected, not enrolled. "
+                "Re-upload a clear, single-face, front-facing photo."
+            )
         else:
-            encrypted = plain_token  # dev mode without secret
-        return JSONResponse({"plainToken": plain_token, "encryptedToken": encrypted})
-    # --- Verify signature (skip in dev if no secret set) ---
-    if ZOOM_WEBHOOK_SECRET:
-        ts  = request.headers.get("x-zm-request-timestamp", "")
-        sig = request.headers.get("x-zm-signature", "")
-        msg = f"v0:{ts}:{body_bytes.decode()}"
-        expected = "v0=" + hmac.new(
-            ZOOM_WEBHOOK_SECRET.encode(), msg.encode(), hashlib.sha256
-        ).hexdigest()
-        if sig != expected:
-            return JSONResponse({"error": "Invalid signature"}, status_code=401)
-    # --- Map Zoom event → Sherlock MeetingEvent ---
-    zoom_event   = body.get("event", "")
-    obj          = body.get("payload", {}).get("object", {})
-    meeting_id   = str(obj.get("id", obj.get("uuid", "unknown")))
-    participant  = obj.get("participant", {})
-    pid          = str(participant.get("user_id") or participant.get("participant_uuid") or "?")
-    name         = participant.get("user_name", "Unknown")
-    email        = participant.get("email")
-    # Auto-create session if not already exists
-    session = _sessions.get(meeting_id)
+            session.engine.context.candidate_face_embedding = embedding
+            result["face_enrolled"] = True
+        del photo_bytes  # explicit: raw bytes are not retained past this line
+
+    if req.audio_b64:
+        try:
+            audio_bytes = base64.b64decode(req.audio_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="audio_b64 is not valid base64")
+        embedding = biometrics.extract_voice_embedding(audio_bytes)
+        if embedding is None:
+            result["errors"].append(
+                "Voice clip rejected — too short, silent, or undecodable. "
+                "Re-record ~20s of clear speech."
+            )
+        else:
+            session.engine.context.candidate_voice_embedding = embedding
+            result["voice_enrolled"] = True
+        del audio_bytes
+
+    log.info(
+        "enrollment for %s: face=%s voice=%s",
+        meeting_id, result["face_enrolled"], result["voice_enrolled"],
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Live meeting endpoints (for meet_bot / zoom_bot — did not exist before)
+# ---------------------------------------------------------------------------
+
+class StartLiveMeetingRequest(BaseModel):
+    meeting_id: Optional[str] = None  # bots can supply their own (e.g. Meet code) or omit to get a generated one
+    candidate_name: Optional[str] = None
+    candidate_email: Optional[str] = None
+    interviewer_names: List[str] = []
+    interviewer_emails: List[str] = []
+
+
+class LiveEventRequest(BaseModel):
+    event_type: str
+    participant_id: str
+    data: Dict[str, Any] = {}
+
+
+@app.post("/api/meeting/live")
+def api_start_live_meeting(req: StartLiveMeetingRequest) -> dict:
+    meeting_id = req.meeting_id or f"m-{uuid.uuid4().hex[:10]}"
+    if meeting_id in _SESSIONS:
+        # Idempotent: a bot may call this more than once for the same
+        # meeting_id (e.g. retry after a dropped connection) — don't
+        # blow away an in-progress session's accumulated state.
+        return {"meeting_id": meeting_id, "context": _SESSIONS[meeting_id].engine.context.to_dict()}
+    context = MeetingContext(
+        meeting_id=meeting_id,
+        candidate_name=req.candidate_name or "",
+        candidate_email=req.candidate_email or "",
+        interviewer_names=req.interviewer_names,
+        interviewer_emails=req.interviewer_emails,
+    )
+    _SESSIONS[meeting_id] = _Session(context, events=None)
+    log.info("started live meeting %s", meeting_id)
+    return {"meeting_id": meeting_id, "context": context.to_dict()}
+
+
+@app.post("/api/meeting/{meeting_id}/event")
+async def api_post_live_event(meeting_id: str, req: LiveEventRequest) -> dict:
+    session = _SESSIONS.get(meeting_id)
     if not session:
-        ctx = MeetingContext(
-            meeting_id=meeting_id,
-            candidate_name="",   # Will be populated via /api/meeting/start later
-            candidate_email="",
-            interviewer_names=[],
-            interviewer_emails=[],
-        )
-        session = MeetingSession(meeting_id, ctx)
-        _sessions[meeting_id] = session
-    ev = None
-    if zoom_event == "meeting.participant_joined":
-        ev = MeetingEvent(EventType.PARTICIPANT_JOIN, pid,
-                          data={"display_name": name, "email": email})
-    elif zoom_event == "meeting.participant_left":
-        ev = MeetingEvent(EventType.PARTICIPANT_LEAVE, pid)
-    elif zoom_event == "meeting.participant_audio_status_updated":
-        muted = participant.get("audio") == "muted"
-        ev = MeetingEvent(
-            EventType.SPEAKING_END if muted else EventType.SPEAKING_START, pid
-        )
-    elif zoom_event == "meeting.participant_video_status_updated":
-        on = participant.get("video") == "started"
-        ev = MeetingEvent(EventType.WEBCAM_ON if on else EventType.WEBCAM_OFF, pid)
-    if ev:
-        result = session.engine.process_event(ev)
-        await session.broadcast({
-            "type": "meeting_event",
-            "event": ev.to_dict(),
-            "identification": result.to_dict(),
-            "state": session.engine.get_state(),
-        })
-    return JSONResponse({"status": "ok"})
+        raise HTTPException(status_code=404, detail="Unknown meeting_id")
+
+    try:
+        event_type = EventType(req.event_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Unknown event_type '{req.event_type}'")
+
+    data = dict(req.data)
+
+    # meet_bot/zoom_bot send raw base64 image/audio, not pre-computed
+    # embeddings — extraction happens here, server-side, once, so
+    # signals.py/engine.py only ever deal with plain float vectors.
+    if event_type == EventType.FACE_SAMPLE and "image_b64" in data:
+        try:
+            image_bytes = base64.b64decode(data.pop("image_b64"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="image_b64 is not valid base64")
+        embedding = biometrics.extract_face_embedding(image_bytes)
+        if embedding is None:
+            # No face in this frame — not an error, just nothing to report
+            # for this event (e.g. participant stepped away, webcam off).
+            return {"identification": None, "note": "no face detected in frame"}
+        prev = session._prev_face_embedding.get(req.participant_id)
+        data["embedding"] = embedding
+        data["liveness_ok"] = biometrics.check_liveness(prev, embedding)
+        session._prev_face_embedding[req.participant_id] = embedding
+
+    elif event_type == EventType.VOICE_SAMPLE and "audio_b64" in data:
+        try:
+            audio_bytes = base64.b64decode(data.pop("audio_b64"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="audio_b64 is not valid base64")
+        embedding = biometrics.extract_voice_embedding(audio_bytes)
+        if embedding is None:
+            return {"identification": None, "note": "no usable speech in clip"}
+        data["embedding"] = embedding
+
+    event = MeetingEvent(event_type=event_type, participant_id=req.participant_id, data=data)
+    result = session.engine.process_event(event)
+    await _broadcast(session, event, result)
+    return {"identification": result.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — streams identification updates to the dashboard
+# ---------------------------------------------------------------------------
+
+async def _broadcast(session: _Session, event: MeetingEvent, result) -> None:
+    payload = {
+        "type": "meeting_event",
+        "event": event.to_dict(),
+        "state": session.engine.get_state(),
+        "identification": result.to_dict(),
+    }
+    dead = []
+    for ws in session.subscribers:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        session.subscribers.remove(ws)
+
+
 @app.websocket("/ws/{meeting_id}")
-async def websocket_endpoint(websocket: WebSocket, meeting_id: str):
+async def ws_meeting(websocket: WebSocket, meeting_id: str) -> None:
     await websocket.accept()
-    session = _sessions.get(meeting_id)
+    session = _SESSIONS.get(meeting_id)
     if not session:
-        await websocket.send_text(json.dumps({"type": "error", "message": "Meeting not found"}))
+        await websocket.send_json({"type": "error", "message": "Unknown meeting_id"})
         await websocket.close()
         return
-    session.connections.append(websocket)
-    await websocket.send_text(json.dumps({
-        "type": "connected",
-        "meeting_id": meeting_id,
-        "context": session.engine.context.to_dict(),
-        "state": session.engine.get_state(),
-    }))
+
+    session.subscribers.append(websocket)
+    await websocket.send_json({"type": "connected", "meeting_id": meeting_id})
+
     try:
-        while True:
-            # Keep connection alive; all pushes are server-initiated
-            msg = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-            # Handle client commands (e.g. manual event injection)
-            try:
-                payload = json.loads(msg)
-                if payload.get("type") == "inject_event":
-                    ev = MeetingEvent(
-                        event_type=payload["event_type"],
-                        participant_id=payload["participant_id"],
-                        timestamp=time.time(),
-                        data=payload.get("data", {}),
-                    )
-                    result = session.engine.process_event(ev)
-                    await session.broadcast({
-                        "type": "meeting_event",
-                        "event": ev.to_dict(),
-                        "identification": result.to_dict(),
-                        "state": session.engine.get_state(),
-                    })
-            except Exception:
-                pass
-    except (WebSocketDisconnect, asyncio.TimeoutError):
-        if websocket in session.connections:
-            session.connections.remove(websocket)
+        if session.live:
+            # Live meeting: just keep the socket open, events arrive via
+            # POST /api/meeting/{id}/event from meet_bot/zoom_bot and get
+            # pushed out by _broadcast(). Read (and discard) any client
+            # pings so we notice disconnects.
+            while True:
+                await websocket.receive_text()
+        else:
+            # Scenario replay: pace events using their recorded timestamps,
+            # compressed by `speed`, so the dashboard sees a realistic
+            # unfolding meeting rather than an instant dump.
+            events = session.events
+            prev_ts = events[0].timestamp if events else time.time()
+            for ev in events:
+                gap = max(0.0, (ev.timestamp - prev_ts) / max(session.speed, 0.01))
+                if gap > 0:
+                    await asyncio.sleep(min(gap, 3.0))
+                prev_ts = ev.timestamp
+
+                result = session.engine.process_event(ev)
+                await _broadcast(session, ev, result)
+
+            await websocket.send_json({"type": "scenario_complete"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if websocket in session.subscribers:
+            session.subscribers.remove(websocket)
+        if not session.live:
+            _SESSIONS.pop(meeting_id, None)
+
+
 # ---------------------------------------------------------------------------
-# Scenario playback
+# Health / root
 # ---------------------------------------------------------------------------
-async def _play_scenario(session: MeetingSession, events: List[MeetingEvent]):
-    """
-    Play scenario events with realistic timing.
-    Each event delay is relative to the first event's timestamp, but we
-    compress time by 1x (real-time) for a 2-minute demo playback.
-    To speed up playback, we divide wall-clock delays by SPEED_FACTOR.
-    """
-    SPEED_FACTOR = 4.0  # 4× faster than real-time
-    if not events:
-        return
-    base_delay = events[0].timestamp
-    start_wall = time.time()
-    for ev in events:
-        # How many seconds into the scenario should this event fire?
-        scenario_offset = ev.timestamp - base_delay
-        # Scale by speed factor
-        wall_offset = scenario_offset / SPEED_FACTOR
-        # Sleep until it's time
-        target_wall = start_wall + wall_offset
-        sleep_dur = target_wall - time.time()
-        if sleep_dur > 0:
-            await asyncio.sleep(sleep_dur)
-        # Fix event timestamp to now
-        ev.timestamp = time.time()
-        result = session.engine.process_event(ev)
-        await session.broadcast({
-            "type": "meeting_event",
-            "event": ev.to_dict(),
-            "identification": result.to_dict(),
-            "state": session.engine.get_state(),
-        })
-    # Signal completion
-    await asyncio.sleep(0.5)
-    await session.broadcast({"type": "scenario_complete"})
-# ---------------------------------------------------------------------------
-# Serve frontend
-# ---------------------------------------------------------------------------
-import os
-_FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend")
-if os.path.isdir(_FRONTEND):
-    app.mount("/", StaticFiles(directory=_FRONTEND, html=True), name="frontend")
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"status": "ok", "active_meetings": len(_SESSIONS)}
+
+
+@app.get("/")
+def root() -> dict:
+    return {
+        "status": "ok",
+        "service": "sherlock-candidate-identification",
+        "scenarios_available": len(SCENARIOS),
+        "docs": "/docs",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8765, reload=True)
+
+    port = int(os.environ.get("PORT", 8765))
+    uvicorn.run(app, host="0.0.0.0", port=port)
