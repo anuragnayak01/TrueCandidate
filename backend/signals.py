@@ -13,12 +13,27 @@ from __future__ import annotations
 import re
 from typing import List
 
+import math
+
 from models import (
     MeetingContext,
     ParticipantState,
     SignalResult,
     SignalType,
 )
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two equal-length embedding vectors, in
+    [-1, 1]. Pure-Python — no numpy dependency needed for this repo."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(y * y for y in b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
 
 # ---------------------------------------------------------------------------
 # Optional: rapidfuzz for better fuzzy matching
@@ -557,6 +572,166 @@ def compute_screen_share(
 
 
 # ---------------------------------------------------------------------------
+# 8. Face Match — pre-meeting biometric reference (highest weight)
+# ---------------------------------------------------------------------------
+#
+# Unlike every other signal, this doesn't ask "does this look like the
+# candidate given the meeting so far" — it asks "does this frame match a
+# reference embedding captured BEFORE the meeting even started." That's why
+# it can carry a much higher weight: it's not inferring from behavior, it's
+# checking against enrolled ground truth. It's still blended (not a hard
+# override) because face matching has a real error rate under bad lighting,
+# poor angle, or camera compression — see SIGNAL_WEIGHTS comment in models.py.
+
+def _rescale(sim: float, reject_at: float, match_at: float) -> float:
+    """Linearly rescale a similarity value onto [0,1], anchored so that
+    `reject_at` -> 0 and `match_at` -> 1. Clamped at the ends. This is used
+    instead of a generic [-1,1]->[0,1] map because different embedding
+    techniques compress their similarity range very differently (e.g. the
+    lightweight MFCC descriptor in biometrics.py sits entirely within
+    ~0.97-1.0) — anchoring to the calibrated thresholds is what makes the
+    resulting score actually discriminate match vs no-match."""
+    if match_at == reject_at:
+        return 0.5
+    frac = (sim - reject_at) / (match_at - reject_at)
+    return max(0.0, min(1.0, frac))
+
+
+_FACE_MATCH_THRESHOLD = 0.55   # cosine sim above this = same person
+_FACE_REJECT_THRESHOLD = 0.30  # below this = confidently a different person
+
+
+def compute_face_match(
+    participant: ParticipantState,
+    context: MeetingContext,
+    all_participants: List[ParticipantState],
+) -> SignalResult:
+    if context.candidate_face_embedding is None:
+        return SignalResult(
+            signal_type=SignalType.FACE_MATCH,
+            score=0.5,
+            signal_confidence=0.0,
+            reason="No pre-meeting face reference enrolled — signal unavailable",
+            evidence={},
+        )
+
+    if participant.latest_face_embedding is None:
+        return SignalResult(
+            signal_type=SignalType.FACE_MATCH,
+            score=0.5,
+            signal_confidence=0.0,
+            reason="No face detected yet (webcam off, or no frame captured)",
+            evidence={},
+        )
+
+    if not participant.latest_face_liveness_ok:
+        # A "match" against a static photo/spoof shouldn't be trusted as a
+        # positive signal — treat it as suspicious rather than confirmatory.
+        return SignalResult(
+            signal_type=SignalType.FACE_MATCH,
+            score=0.10,
+            signal_confidence=0.75,
+            reason="Liveness check failed on this frame — possible photo/spoof attempt",
+            evidence={"liveness_ok": False},
+        )
+
+    sim = _cosine_similarity(context.candidate_face_embedding, participant.latest_face_embedding)
+    # NOTE: 0.55/0.30 are reasonable starting anchors for the pixel-descriptor
+    # in biometrics.py but are NOT empirically calibrated against real face
+    # photos (this sandbox has no real photo data to test against — see
+    # conversation notes). Calibrate against real enrollment/webcam pairs
+    # before relying on this in production; same caveat applies if this is
+    # swapped for a real ArcFace embedding, which has its own typical range.
+    score = _rescale(sim, _FACE_REJECT_THRESHOLD, _FACE_MATCH_THRESHOLD)
+
+    if sim >= _FACE_MATCH_THRESHOLD:
+        reason = f"Face matches enrolled reference (similarity={sim:.2f})"
+        confidence = 0.95
+    elif sim <= _FACE_REJECT_THRESHOLD:
+        reason = f"Face does NOT match enrolled reference (similarity={sim:.2f})"
+        confidence = 0.90
+    else:
+        reason = f"Face match inconclusive (similarity={sim:.2f})"
+        confidence = 0.5
+
+    return SignalResult(
+        signal_type=SignalType.FACE_MATCH,
+        score=score,
+        signal_confidence=confidence,
+        reason=reason,
+        evidence={"cosine_similarity": round(sim, 4)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Voice Match — pre-meeting biometric reference
+# ---------------------------------------------------------------------------
+
+# NOTE ON THRESHOLDS: these are calibrated for the lightweight MFCC
+# mean/std descriptor in biometrics.py, NOT a generic [-1,1] cosine range.
+# Measured empirically: same-speaker clips land around sim≈0.999+, while
+# clearly different speakers still land around sim≈0.97-0.98 — MFCC-pooled
+# vectors are dominated by generic speech-spectrum shape, not speaker
+# identity, so similarity is compressed near 1.0 regardless of match. If
+# biometrics.extract_voice_embedding() is swapped for a real deep
+# speaker-embedding model (ECAPA-TDNN etc), these thresholds MUST be
+# recalibrated — deep speaker embeddings typically separate same/different
+# speakers much more widely (e.g. same-speaker ~0.7-0.9, different ~0.0-0.3).
+_VOICE_MATCH_THRESHOLD = 0.995
+_VOICE_REJECT_THRESHOLD = 0.985
+
+
+def compute_voice_match(
+    participant: ParticipantState,
+    context: MeetingContext,
+    all_participants: List[ParticipantState],
+) -> SignalResult:
+    if context.candidate_voice_embedding is None:
+        return SignalResult(
+            signal_type=SignalType.VOICE_MATCH,
+            score=0.5,
+            signal_confidence=0.0,
+            reason="No pre-meeting voice reference enrolled — signal unavailable",
+            evidence={},
+        )
+
+    if participant.latest_voice_embedding is None:
+        return SignalResult(
+            signal_type=SignalType.VOICE_MATCH,
+            score=0.5,
+            signal_confidence=0.0,
+            reason="No voice sample captured yet (muted, or not yet spoken)",
+            evidence={},
+        )
+
+    sim = _cosine_similarity(context.candidate_voice_embedding, participant.latest_voice_embedding)
+    # Rescale using the calibrated thresholds as anchors (NOT a generic
+    # [-1,1] -> [0,1] map) — see threshold comment above for why: this
+    # descriptor's similarities are compressed near 1.0, so anchoring the
+    # score to the actual reject/match boundary is what makes "no match"
+    # actually pull the composite score down instead of barely moving it.
+    score = _rescale(sim, _VOICE_REJECT_THRESHOLD, _VOICE_MATCH_THRESHOLD)
+
+    if sim >= _VOICE_MATCH_THRESHOLD:
+        reason = f"Voice matches enrolled reference (similarity={sim:.2f})"
+        confidence = 0.90
+    elif sim <= _VOICE_REJECT_THRESHOLD:
+        reason = f"Voice does NOT match enrolled reference (similarity={sim:.2f})"
+        confidence = 0.85
+    else:
+        reason = f"Voice match inconclusive (similarity={sim:.2f}) — short/noisy sample"
+        confidence = 0.4
+
+    return SignalResult(
+        signal_type=SignalType.VOICE_MATCH,
+        score=score,
+        signal_confidence=confidence,
+        reason=reason,
+        evidence={"cosine_similarity": round(sim, 4)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public dispatcher
 # ---------------------------------------------------------------------------
 
@@ -568,6 +743,8 @@ ALL_SIGNAL_FUNCS = {
     SignalType.TRANSCRIPT_LANGUAGE: compute_transcript_language,
     SignalType.JOIN_ORDER: compute_join_order,
     SignalType.SCREEN_SHARE: compute_screen_share,
+    SignalType.FACE_MATCH: compute_face_match,
+    SignalType.VOICE_MATCH: compute_voice_match,
 }
 
 
