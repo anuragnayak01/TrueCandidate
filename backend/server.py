@@ -459,7 +459,41 @@ async def ws_meeting(websocket: WebSocket, meeting_id: str) -> None:
         if not session.live:
             _SESSIONS.pop(meeting_id, None)
 
+@app.post("/api/meeting/{meeting_id}/end")
+async def api_end_meeting(meeting_id: str) -> dict:
+    session = _SESSIONS.get(meeting_id)
 
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown meeting_id"
+        )
+
+    # Notify connected dashboard clients
+    for ws in session.subscribers:
+        try:
+            await ws.send_json({
+                "type": "meeting_ended",
+                "meeting_id": meeting_id,
+                "message": "Meeting completed"
+            })
+            await ws.close()
+        except Exception:
+            pass
+
+    # Remove session completely
+    del _SESSIONS[meeting_id]
+
+    log.info(
+        "ended meeting %s and cleared session",
+        meeting_id
+    )
+
+    return {
+        "status": "completed",
+        "meeting_id": meeting_id
+    }
+    
 # ---------------------------------------------------------------------------
 # Health / root
 # ---------------------------------------------------------------------------
