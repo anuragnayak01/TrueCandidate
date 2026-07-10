@@ -9,10 +9,35 @@ Each scenario describes:
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any, Dict, List
 
 from models import EventType, MeetingContext, MeetingEvent
+
+# ---------------------------------------------------------------------------
+# Deterministic mock embeddings for scenario data
+# ---------------------------------------------------------------------------
+# Demo scenarios are canned/replayed, not run through biometrics.py's real
+# extraction — they need embedding VALUES directly, in the same format the
+# real pipeline produces (a plain List[float]). These are seeded so the
+# same "identity" always produces the same vector, and reproducible across
+# runs for consistent demo behavior.
+
+def _vec(seed: str, n: int = 16) -> List[float]:
+    rng = random.Random(seed)
+    v = [rng.uniform(-1, 1) for _ in range(n)]
+    mag = sum(x * x for x in v) ** 0.5
+    return [x / mag for x in v]
+
+
+def _near(ref: List[float], seed: str, noise: float = 0.03) -> List[float]:
+    """A slightly-perturbed copy of `ref` — simulates the same person's
+    face/voice sampled at a different moment (natural variation)."""
+    rng = random.Random(seed)
+    v = [x + rng.uniform(-noise, noise) for x in ref]
+    mag = sum(x * x for x in v) ** 0.5
+    return [x / mag for x in v]
 
 # ---------------------------------------------------------------------------
 # Helper to build timed event lists cleanly
@@ -319,6 +344,108 @@ _evs6: List[dict] = [
     {"delay": 105.0,"event_type": "transcript_segment", "participant_id": "p3", "data": {"text": "Sure. I once had to decide whether to refactor our monolith to microservices under a tight deadline. My analysis showed that the coupling was too high for a clean split given the timeline. My decision was to first extract the three highest-value services while keeping the core monolith stable, rather than doing a full rewrite. That turned out to be the right call."}},
 ]
 _register("missing_ats", {"name": "No ATS Data", "difficulty": "hard", "description": "No candidate name or email. System relies entirely on speech patterns + join order.", "emoji": "🔴"}, _ctx6, _evs6)
+
+
+# ===========================================================================
+# 7. Biometric Lock — face+voice survive wrong ATS name, no email, 3 renames
+# ===========================================================================
+# The scenario directly from the original brief that nothing else covers:
+# "Interviewer enters the wrong candidate name." Combined with missing email
+# and repeated junk display-name changes, every metadata signal is actively
+# wrong or unavailable here — only face+voice can carry this one.
+_face_ref_7 = _vec("candidate-7-face")
+_voice_ref_7 = _vec("candidate-7-voice")
+_ctx7 = MeetingContext(
+    meeting_id="meet-007",
+    candidate_name="Totally Wrong Name",   # ATS typo/mis-entry — not the real candidate
+    candidate_email="",                     # also missing
+    interviewer_names=["Priya Nair"],
+    interviewer_emails=["priya.n@acmecorp.com"],
+    job_title="Data Scientist",
+    company="Acme Corp",
+    candidate_face_embedding=_face_ref_7,
+    candidate_voice_embedding=_voice_ref_7,
+)
+_evs7: List[dict] = [
+    {"delay": 0.5,  "event_type": "participant_join",   "participant_id": "p1", "data": {"display_name": "Priya Nair", "email": "priya.n@acmecorp.com"}},
+    {"delay": 1.5,  "event_type": "participant_join",   "participant_id": "p2", "data": {"display_name": "MacBook Pro", "email": None}},
+    {"delay": 3.0,  "event_type": "face_sample",        "participant_id": "p2", "data": {"embedding": _near(_face_ref_7, "s7-face-1"), "liveness_ok": True}},
+    {"delay": 3.5,  "event_type": "voice_sample",       "participant_id": "p2", "data": {"embedding": _near(_voice_ref_7, "s7-voice-1")}},
+    {"delay": 5.0,  "event_type": "speaking_start",     "participant_id": "p1", "data": {}},
+    {"delay": 9.0,  "event_type": "speaking_end",       "participant_id": "p1", "data": {}},
+    {"delay": 9.0,  "event_type": "transcript_segment", "participant_id": "p1", "data": {"text": "Let's get started — can you introduce yourself?"}},
+    {"delay": 10.0, "event_type": "name_change",        "participant_id": "p2", "data": {"new_name": "random_guest_93"}},
+    {"delay": 10.5, "event_type": "speaking_start",     "participant_id": "p2", "data": {}},
+    {"delay": 40.0, "event_type": "speaking_end",       "participant_id": "p2", "data": {}},
+    {"delay": 40.0, "event_type": "transcript_segment", "participant_id": "p2", "data": {"text": "Sure — I'm a data scientist with five years of experience, mostly focused on recommendation systems and NLP pipelines at scale."}},
+    {"delay": 41.0, "event_type": "face_sample",        "participant_id": "p2", "data": {"embedding": _near(_face_ref_7, "s7-face-2"), "liveness_ok": True}},
+    {"delay": 42.0, "event_type": "name_change",        "participant_id": "p2", "data": {"new_name": "John Nobody"}},
+    {"delay": 43.0, "event_type": "voice_sample",       "participant_id": "p2", "data": {"embedding": _near(_voice_ref_7, "s7-voice-2")}},
+    {"delay": 44.0, "event_type": "speaking_start",     "participant_id": "p1", "data": {}},
+    {"delay": 48.0, "event_type": "speaking_end",       "participant_id": "p1", "data": {}},
+    {"delay": 48.0, "event_type": "transcript_segment", "participant_id": "p1", "data": {"text": "Great, tell me about a recommendation system you built."}},
+]
+_register(
+    "biometric_lock",
+    {
+        "name": "Biometric Lock (Wrong ATS Name)",
+        "difficulty": "hard",
+        "description": "ATS has the wrong candidate name and no email. Candidate also renames themselves twice. Pre-enrolled face+voice carry identification anyway.",
+        "emoji": "🧿",
+    },
+    _ctx7,
+    _evs7,
+)
+
+
+# ===========================================================================
+# 8. Impersonation Alert — face matches, voice does NOT (cross-modal mismatch)
+# ===========================================================================
+# Name and email look completely normal here — the fraud is only visible
+# biometrically: someone else is answering while the enrolled candidate's
+# face sits on camera (or a spoofed feed), which is exactly the scenario
+# the IDENTITY_MISMATCH hard-trigger exists for.
+_face_ref_8 = _vec("candidate-8-face")
+_voice_ref_8 = _vec("candidate-8-voice")
+_wrong_voice_8 = _vec("impostor-8-voice")  # deliberately unrelated voice
+_ctx8 = MeetingContext(
+    meeting_id="meet-008",
+    candidate_name="Diego Ferreira",
+    candidate_email="diego.f@outlook.com",
+    interviewer_names=["Jordan Kim"],
+    interviewer_emails=["jordan.k@acmecorp.com"],
+    job_title="DevOps Engineer",
+    company="Acme Corp",
+    candidate_face_embedding=_face_ref_8,
+    candidate_voice_embedding=_voice_ref_8,
+)
+_evs8: List[dict] = [
+    {"delay": 0.5,  "event_type": "participant_join",   "participant_id": "p1", "data": {"display_name": "Jordan Kim", "email": "jordan.k@acmecorp.com"}},
+    {"delay": 1.5,  "event_type": "participant_join",   "participant_id": "p2", "data": {"display_name": "Diego Ferreira", "email": "diego.f@outlook.com"}},
+    {"delay": 3.0,  "event_type": "face_sample",        "participant_id": "p2", "data": {"embedding": _near(_face_ref_8, "s8-face-1"), "liveness_ok": True}},
+    {"delay": 4.0,  "event_type": "speaking_start",     "participant_id": "p1", "data": {}},
+    {"delay": 8.0,  "event_type": "speaking_end",       "participant_id": "p1", "data": {}},
+    {"delay": 8.0,  "event_type": "transcript_segment", "participant_id": "p1", "data": {"text": "Thanks for joining, Diego. Let's start with your background."}},
+    {"delay": 9.0,  "event_type": "speaking_start",     "participant_id": "p2", "data": {}},
+    # Voice sample doesn't match the enrolled reference — face does. This
+    # is the case the blended composite score alone would under-react to;
+    # the hard-trigger is what actually surfaces it.
+    {"delay": 10.0, "event_type": "voice_sample",       "participant_id": "p2", "data": {"embedding": _wrong_voice_8}},
+    {"delay": 35.0, "event_type": "speaking_end",       "participant_id": "p2", "data": {}},
+    {"delay": 35.0, "event_type": "transcript_segment", "participant_id": "p2", "data": {"text": "Sure, I've spent the last four years doing DevOps and platform engineering, mostly with Kubernetes and Terraform."}},
+    {"delay": 36.0, "event_type": "face_sample",        "participant_id": "p2", "data": {"embedding": _near(_face_ref_8, "s8-face-2"), "liveness_ok": True}},
+]
+_register(
+    "impersonation_alert",
+    {
+        "name": "Impersonation Alert",
+        "difficulty": "hard",
+        "description": "Name and email look correct. Face matches the enrolled candidate, but voice doesn't — triggers a cross-modal IDENTITY_MISMATCH fraud flag.",
+        "emoji": "🚨",
+    },
+    _ctx8,
+    _evs8,
+)
 
 
 # ---------------------------------------------------------------------------
