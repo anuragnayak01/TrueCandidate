@@ -184,6 +184,11 @@ class StartLiveMeetingRequest(BaseModel):
     candidate_email: Optional[str] = None
     interviewer_names: List[str] = []
     interviewer_emails: List[str] = []
+    # Display-only context (see MeetingContext.to_dict() / dashboard context
+    # card) — NOT scored by any signal, purely informational for whoever is
+    # reviewing the case file.
+    job_title: Optional[str] = None
+    company: Optional[str] = None
 
 
 class LiveEventRequest(BaseModel):
@@ -200,13 +205,17 @@ def api_start_live_meeting(req: StartLiveMeetingRequest) -> dict:
         # meeting_id (e.g. retry after a dropped connection) — don't
         # blow away an in-progress session's accumulated state.
         return {"meeting_id": meeting_id, "context": _SESSIONS[meeting_id].engine.context.to_dict()}
-    context = MeetingContext(
+    context_kwargs = dict(
         meeting_id=meeting_id,
         candidate_name=req.candidate_name or "",
         candidate_email=req.candidate_email or "",
         interviewer_names=req.interviewer_names,
         interviewer_emails=req.interviewer_emails,
+        job_title=req.job_title or "",
     )
+    if req.company:
+        context_kwargs["company"] = req.company  # else MeetingContext's own default applies
+    context = MeetingContext(**context_kwargs)
     _SESSIONS[meeting_id] = _Session(context, events=None)
     log.info("started live meeting %s", meeting_id)
     return {"meeting_id": meeting_id, "context": context.to_dict()}
@@ -349,4 +358,3 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8765))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
