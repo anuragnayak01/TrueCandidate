@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import time
@@ -86,6 +87,7 @@ class GoogleMeetBot:
         self.speaking_pids: Set[str]            = set()
         self.http: Optional[httpx.AsyncClient]  = None
         self._session_created = False
+        self._observe_tick = 0  # throttles face-sample capture cadence
 
     # ------------------------------------------------------------------
     # Entry point
@@ -221,6 +223,8 @@ class GoogleMeetBot:
 
     async def _check_participants(self, page: Page):
         """Detect participant join/leave/speaking changes via DOM."""
+        self._observe_tick += 1
+        capture_face_this_tick = (self._observe_tick % 5 == 0)  # ~every 5s, not every poll
 
         # --- Strategy 1: data-participant-id chips ---
         tiles = await page.query_selector_all(SEL_PARTICIPANT_CHIP)
@@ -262,6 +266,12 @@ class GoogleMeetBot:
             elif not is_speaking and pid in self.speaking_pids:
                 self.speaking_pids.discard(pid)
                 await self._send_event("speaking_end", pid)
+
+            # Periodic face sample (throttled — see _capture_face_sample
+            # docstring for the honest caveat on this being untested
+            # against a real meeting)
+            if capture_face_this_tick:
+                await self._capture_face_sample(page, tile, pid)
 
         # Detect leaves
         for pid in list(self.known_participants.keys()):
@@ -367,42 +377,79 @@ class GoogleMeetBot:
             return
         try:
             r = await self.http.post(
-                f"{self.sherlock_url}/api/meeting/start",
+                f"{self.sherlock_url}/api/meeting/live",
                 json={
-                    "context": {
-                        "meeting_id": self.meeting_id,
-                        "candidate_name":  self.candidate_name,
-                        "candidate_email": self.candidate_email,
-                        "interviewer_names":  self.interviewers,
-                        "interviewer_emails": [],
-                        "company": "Live Meeting",
-                    },
-                    "events": [],  # No pre-loaded events — real-time from bot
+                    "meeting_id": self.meeting_id,
+                    "candidate_name":  self.candidate_name,
+                    "candidate_email": self.candidate_email,
+                    "interviewer_names":  self.interviewers,
+                    "interviewer_emails": [],
                 },
             )
             if r.status_code == 200:
                 self._session_created = True
                 print(f"[Bot] Sherlock session created: {self.meeting_id}")
+            else:
+                print(f"[Bot] Sherlock session creation failed: {r.status_code} {r.text}")
         except Exception as e:
             print(f"[Bot] Failed to create Sherlock session: {e}")
 
     async def _send_event(self, event_type: str, participant_id: str, data: dict | None = None):
-        """POST a single event to Sherlock's inject endpoint."""
+        """POST a single event to Sherlock's live-event endpoint."""
         if not self._session_created and event_type == "participant_join":
             await self._ensure_session()
 
         try:
             await self.http.post(
-                f"{self.sherlock_url}/api/event/{self.meeting_id}",
+                f"{self.sherlock_url}/api/meeting/{self.meeting_id}/event",
                 json={
                     "event_type": event_type,
                     "participant_id": participant_id,
-                    "timestamp": time.time(),
                     "data": data or {},
                 },
             )
         except Exception as e:
             print(f"[Bot] Event send failed ({event_type}): {e}")
+
+    async def _capture_face_sample(self, page: Page, tile, participant_id: str):
+        """
+        Screenshot a participant's video tile and send it as a FACE_SAMPLE
+        event — the server (biometrics.py) extracts the embedding, this bot
+        never computes or sees the embedding itself, just raw JPEG bytes.
+
+        NOT independently verified against a live Google Meet session in
+        this environment (no real browser meeting available to test
+        against) — the screenshot/base64/POST mechanics below are standard
+        Playwright + httpx patterns, but you should confirm the tile
+        selector actually yields a clean single-face crop against a real
+        meeting before relying on this.
+        """
+        try:
+            png_bytes = await tile.screenshot(type="jpeg", quality=70)
+            image_b64 = base64.b64encode(png_bytes).decode()
+            await self._send_event("face_sample", participant_id, {"image_b64": image_b64})
+        except Exception as e:
+            print(f"[Bot] Face capture failed for {participant_id}: {e}")
+
+    async def _capture_voice_sample(self, participant_id: str, wav_bytes: bytes):
+        """
+        Send a short raw audio clip as a VOICE_SAMPLE event for server-side
+        embedding extraction.
+
+        INTEGRATION GAP, stated plainly: this method's signature is ready,
+        but nothing in this file currently produces `wav_bytes`. Google
+        Meet's per-participant audio isn't exposed to page-level Playwright
+        automation the way video tiles are — capturing it requires either
+        (a) the meeting platform's own recording/audio API, or (b) a
+        separate WebRTC-level audio tap outside what page.screenshot()-style
+        DOM automation can do. This is real, unsolved integration work, not
+        a mocked stub pretending otherwise.
+        """
+        try:
+            audio_b64 = base64.b64encode(wav_bytes).decode()
+            await self._send_event("voice_sample", participant_id, {"audio_b64": audio_b64})
+        except Exception as e:
+            print(f"[Bot] Voice sample send failed for {participant_id}: {e}")
 
 
 # ---------------------------------------------------------------------------
