@@ -275,7 +275,15 @@
     </div>
     <div class="intake-actions">
       <button class="btn-primary" id="connectBtn">Open Case</button>
-      <button class="btn-ghost" id="disconnectBtn" style="display:none;">Close Case</button>
+    
+      <button class="btn-ghost" id="closeMeetingBtn">
+        Close Meeting
+      </button>
+    
+      <button class="btn-ghost" id="disconnectBtn" style="display:none;">
+        Disconnect
+      </button>
+    
       <span class="intake-note" id="intakeNote"></span>
     </div>
   </div>
@@ -303,6 +311,7 @@
   const intakeNote = $('intakeNote');
   const connectBtn = $('connectBtn');
   const disconnectBtn = $('disconnectBtn');
+  const closeMeetingBtn = $('closeMeetingBtn');
   const board = $('board');
   const metaStrip = $('metaStrip');
   const dossierList = $('dossierList');
@@ -434,7 +443,75 @@
     disconnectBtn.style.display = 'none';
     setStatus('', 'Awaiting case file');
   }
+  async function closeMeeting(){
 
+    const meetingId = $('meetingId').value.trim();
+
+    if(!meetingId){
+        intakeNote.textContent = "Enter meeting ID first.";
+        return;
+    }
+
+
+    try{
+
+        closeMeetingBtn.disabled = true;
+        intakeNote.textContent = "Closing meeting...";
+
+
+        const res = await fetch(
+          `${httpBase()}/api/meeting/${encodeURIComponent(meetingId)}/end`,
+          {
+            method:"POST"
+          }
+        );
+
+
+        if(!res.ok){
+            throw new Error(
+              `Server returned ${res.status}`
+            );
+        }
+
+
+        const data = await res.json();
+
+
+        intakeNote.textContent =
+          `Meeting closed successfully (${data.meeting_id})`;
+
+
+        setStatus(
+          '',
+          'Meeting completed'
+        );
+
+
+        if(ws){
+            ws.close();
+            ws=null;
+        }
+
+
+    }
+    catch(err){
+
+        intakeNote.textContent =
+          err.message || "Failed to close meeting";
+
+        setStatus(
+          'err',
+          'Close failed'
+        );
+
+    }
+    finally{
+
+        closeMeetingBtn.disabled=false;
+
+    }
+
+}
   // ------------------------------------------------------------------
   // New Case Intake
   // ------------------------------------------------------------------
@@ -652,6 +729,10 @@
 
   createCaseBtn.addEventListener('click', createCase);
   connectBtn.addEventListener('click', openCase);
+  closeMeetingBtn.addEventListener(
+      'click',
+      closeMeeting
+  );
   disconnectBtn.addEventListener('click', closeCase);
   $('meetingId').addEventListener('keydown', (e) => { if(e.key === 'Enter') openCase(); });
 })();
