@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import time
 from typing import Dict, Set, Optional
 
@@ -33,6 +34,11 @@ SEL_JOIN_BTN          = '#joinBtn, button:has-text("Join"), button[type="submit"
 SEL_PARTICIPANT_ITEM  = '.participants-item, .participants-list-item__avatar-name, [class*="participant-item"]'
 SEL_SPEAKING_ACTIVE   = '[class*="speaking"], [aria-label*="speaking"], [class*="active-speaker"]'
 SEL_OPEN_PARTICIPANTS = '[aria-label*="Participants"], [title*="Participants"]'
+
+
+def stable_pid(name: str) -> str:
+    norm = name.strip().lower()
+    return f"zoom-{hashlib.md5(norm.encode()).hexdigest()[:10]}"
 
 
 class ZoomBot:
@@ -152,14 +158,16 @@ class ZoomBot:
             if not name or name == self.bot_display_name:
                 continue
 
-            pid = f"zoom-{abs(hash(name)) % 99999}"
+            pid = stable_pid(name)
             current_pids.add(pid)
 
+            # Join/leave reporting removed — the Zoom webhook is now
+            # authoritative for participant presence (real Zoom IDs,
+            # doesn't break when Zoom changes their DOM). This bot only
+            # still needs known_participants to track speaking state.
             if pid not in self.known_participants:
                 self.known_participants[pid] = name
-                print(f"[ZoomBot] JOIN: {name}")
-                await self._ensure_session()
-                await self._send_event("participant_join", pid, {"display_name": name})
+                await self._ensure_session()  # still needed: creates the session if webhook hasn't yet
 
             # Speaking detection
             speaking = await item.query_selector(SEL_SPEAKING_ACTIVE)
@@ -174,10 +182,8 @@ class ZoomBot:
 
         for pid in list(self.known_participants.keys()):
             if pid not in current_pids:
-                name = self.known_participants.pop(pid)
+                self.known_participants.pop(pid)
                 self.speaking_pids.discard(pid)
-                print(f"[ZoomBot] LEAVE: {name}")
-                await self._send_event("participant_leave", pid)
 
     async def _ensure_session(self):
         if self._session_created:
