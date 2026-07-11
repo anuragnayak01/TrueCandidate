@@ -1,6 +1,6 @@
  
 
-# TrueCandidate :  Real-Time Interview Candidate Identification
+# TrueCandidate(Sherlock) :  Real-Time Interview Candidate Identification
 
 Sherlock identifies the actual interview candidate among all participants in
 a live meeting — even when they join under the wrong name, a device name
