@@ -19,7 +19,6 @@ RUN playwright install chromium
 RUN playwright install-deps chromium
 
 COPY backend/ ./backend/
-COPY frontend/ ./frontend/
 COPY meet_bot/ ./meet_bot/
 
 WORKDIR /app/backend
